@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "articlegen"
+version = "0.1.0"
+description = "Iterative multi-agent article/code pipeline with bounded context and an append-only change log"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+# Deliberately empty: the package runs on the standard library alone so the loop is
+# executable in constrained/free-tier environments.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+# The pipeline core has zero runtime dependencies; the dashboard is opt-in.
+ui = ["streamlit>=1.49", "pandas>=2.0"]
+
+[project.scripts]
+articlegen = "articlegen.cli:main"
+
+[tool.setuptools]
+packages = ["articlegen", "articlegen.agents", "articlegen.ui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
