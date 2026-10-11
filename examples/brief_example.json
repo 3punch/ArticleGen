@@ -1,0 +1,40 @@
+{
+  "task_id": "demo-article",
+  "title": "Designing an Iterative Multi-Agent Writing Pipeline",
+  "objective": "Explain how a five-agent pipeline turns a brief into a reviewed draft through bounded iterations, and what a reader must decide before adopting the pattern in production.",
+  "audience": "engineers building LLM workflow tooling who care about cost control and auditability",
+  "mode": "article",
+  "tone": "neutral, precise, professional",
+  "target_words": 1000,
+  "requires_citations": false,
+  "constraints": [
+    "explain the decision gate before the agent loop",
+    "cover the token budget policy explicitly"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "title": "Introduction",
+      "purpose": "frame why unbounded agent loops are expensive and hard to audit",
+      "word_target": 180
+    },
+    {
+      "id": "decision-gate",
+      "title": "The Decision Gate",
+      "purpose": "explain how invalid input is rejected before any agent spends tokens",
+      "word_target": 240
+    },
+    {
+      "id": "agent-roles",
+      "title": "Mandatory Agent Roles",
+      "purpose": "describe the five roles, their fixed order and what each one owns",
+      "word_target": 300
+    },
+    {
+      "id": "token-budget",
+      "title": "Token and Memory Policy",
+      "purpose": "explain context caps, priority eviction and the rolling summary",
+      "word_target": 280
+    }
+  ]
+}

@@ -1,0 +1,160 @@
+name: ArticleGen Pipeline
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      brief:
+        description: "Path to the brief JSON to run"
+        required: false
+        default: "examples/brief_example.json"
+      iterations:
+        description: "Maximum iterations"
+        required: false
+        default: "4"
+      provider:
+        description: "LLM provider (auto|anthropic|openai|offline)"
+        required: false
+        default: "auto"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and input gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        # The [ui] extra pulls streamlit + pandas. Without it the AppTest tests
+        # skip rather than fail, which would silently drop dashboard coverage.
+        run: python -m pip install --upgrade pip pytest && python -m pip install -e '.[ui]'
+
+      - name: Run the test suite
+        run: python -m pytest tests/ -q
+
+      - name: Assert the dashboard tests actually ran
+        # A regression that makes streamlit unimportable would otherwise pass CI
+        # while silently testing nothing, so an explicit skip count is asserted.
+        #
+        # Deliberately does NOT parse pytest's summary line: pyproject sets
+        # addopts = "-q", and passing another -q here doubles it, which suppresses
+        # the summary entirely and makes any tail -1 match fail spuriously. Grep the
+        # whole -rs output for the short test summary info instead.
+        run: |
+          set -o pipefail
+          python -m pytest tests/test_ui.py -rs 2>&1 | tee ui-tests.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ]; then
+            echo "::error::dashboard tests failed (exit $STATUS)"
+            exit 1
+          fi
+          if grep -qE "^SKIPPED" ui-tests.log; then
+            echo "::error::dashboard tests were skipped - streamlit is missing from the CI install"
+            grep -E "^SKIPPED" ui-tests.log
+            exit 1
+          fi
+          echo "dashboard tests ran with no skips"
+
+      - name: Verify the shipped example brief passes the gate
+        run: python -m articlegen verify examples/brief_example.json
+
+      - name: Verify the invalid example is routed back
+        run: |
+          if python -m articlegen verify examples/brief_invalid.json; then
+            echo "expected the invalid brief to be routed back" >&2
+            exit 1
+          fi
+          echo "invalid brief correctly routed back"
+
+      - name: Confirm prompt templates and rules digest load
+        run: |
+          python - <<'PY'
+          from articlegen.prompts import AGENT_TEMPLATES, load_template, rules_digest
+          for agent_id in AGENT_TEMPLATES:
+              body = load_template(agent_id)
+              assert body.strip(), agent_id
+              print(f"template ok: {agent_id} ({len(body)} chars)")
+          digest = rules_digest()
+          print(f"rules digest ok ({len(digest)} chars)")
+          from articlegen.tokens import count_tokens
+          print(f"rules digest cost: {count_tokens(digest)} tokens per agent call")
+          PY
+
+  pipeline:
+    name: Orchestrated run
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[ui]'
+
+      - name: Smoke test the dashboard launch command
+        # Starts the real server and waits for /_stcore/health, so a broken launch
+        # path fails here instead of only when a human clicks the preview.
+        run: |
+          python -m articlegen ui --port 8599 --address 127.0.0.1 --no-cors > ui.log 2>&1 &
+          UI_PID=$!
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8599/_stcore/health > /dev/null 2>&1; then
+              echo "dashboard healthy after ${i}s"
+              curl -fsS -o /dev/null -w "index: HTTP %{http_code}\n" http://127.0.0.1:8599/
+              kill "$UI_PID" 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::dashboard never became healthy"
+          cat ui.log
+          kill "$UI_PID" 2>/dev/null || true
+          exit 1
+
+      - name: Run the pipeline
+        env:
+          # Free-tier default: no key -> deterministic engine. Set a secret to use a model.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          BRIEF="${{ github.event.inputs.brief || 'examples/brief_example.json' }}"
+          ITERATIONS="${{ github.event.inputs.iterations || '4' }}"
+          PROVIDER="${{ github.event.inputs.provider || 'auto' }}"
+          python -m articlegen run "$BRIEF" \
+            --iterations "$ITERATIONS" \
+            --provider "$PROVIDER" \
+            --workspace runs \
+            --changelog runs/change_log.md \
+            --json runs/result.json
+        continue-on-error: true
+
+      - name: Upload run artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: articlegen-run
+          path: |
+            runs/
+          if-no-files-found: warn
+
+      - name: Summarise
+        run: |
+          echo "### ArticleGen run" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f runs/change_log.md ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 60 runs/change_log.md >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_no change log produced_" >> "$GITHUB_STEP_SUMMARY"
+          fi

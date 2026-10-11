@@ -1,0 +1,12 @@
+{
+  "task_id": "bad-brief",
+  "title": "TBD",
+  "objective": "write stuff",
+  "audience": "",
+  "mode": "article",
+  "target_words": 50,
+  "sections": [
+    { "id": "One Section", "title": "Intro", "purpose": "short", "word_target": 10 },
+    { "id": "intro", "title": "Intro", "purpose": "duplicate id and title to trip the gate", "word_target": 10 }
+  ]
+}
