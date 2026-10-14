@@ -1,9 +1,4 @@
-import json
-import os
-
-import pytest
-
-from articlegen.changelog import ChangeLog, read_jsonl
+from articlegen.changelog import read_jsonl
 from articlegen.models import Brief, Draft, Section
 from articlegen.orchestrator import Orchestrator, OrchestratorConfig
 from articlegen.scoring import decide_next, score_iteration
@@ -160,7 +155,7 @@ def test_score_iteration_penalises_blockers_more_than_notes(valid_brief):
     from articlegen.models import AgentReport, Finding, Severity
     from articlegen.tokens import TokenBudget
 
-    tester = build_agents(OfflineClient(), TokenBudget.default())[1]
+    build_agents(OfflineClient(), TokenBudget.default())
     draft = Draft.from_brief(valid_brief)
     for section in draft.sections:
         section.body = "Content."

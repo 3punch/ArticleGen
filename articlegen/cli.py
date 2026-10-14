@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from . import __version__
 from .changelog import ChangeLog, read_jsonl
 from .gate import verify_brief
-from .models import Brief, Severity
+from .models import Brief
 from .orchestrator import Orchestrator, OrchestratorConfig
 
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

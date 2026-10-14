@@ -17,9 +17,9 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
-from .models import AgentReport, Draft, Finding, Severity
+from .models import Draft, Finding, Severity
 from .tokens import TokenBudget, count_tokens, truncate_to_tokens
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
@@ -136,7 +136,6 @@ def assemble(blocks: Iterable[Block], budget: TokenBudget, *, header: str = "") 
     for block in ordered:
         if not block.text.strip():
             continue
-        cost = block.tokens + 1
         section = f"### {block.key}\n{block.text.strip()}"
         section_cost = count_tokens(section) + 1
 
@@ -248,6 +247,40 @@ def draft_block(draft: Draft, max_tokens: int) -> str:
     return truncate_to_tokens(text, max_tokens)
 
 
+#: Writer remit mirrored from the Writer agent (kept literal to avoid a
+#: circular import through the agents package).
+_WRITER_REMIT = {"readability", "clarity", "completeness", "flow", "redundancy",
+                 "tone", "consistency", "coverage", "balance", "narrative"}
+_WRITER_FILL_RATIO = 0.8
+
+
+def writer_delta_block(brief, draft: Draft, findings: List[Finding], max_tokens: int) -> str:
+    """Delta rendering of the master draft for the Writer.
+
+    The Writer may only change sections that are under target or named in an
+    open finding inside its remit, so it only ever needs those sections in
+    full. Everything it is forbidden to touch is reduced to a one-line
+    attestation - which is what cuts the Writer's context packet from O(draft)
+    to O(needed work) on every iteration after the first.
+    """
+    if draft is None:
+        return "no draft yet"
+    default_target = max(80, brief.target_words // max(1, len(draft.sections)))
+    targeted = {f.section for f in findings
+                if f.agent in ("reviewer", "tester", "architect")
+                and f.category in _WRITER_REMIT and f.section}
+    parts = []
+    for section in draft.sections:
+        target = section.word_target or default_target
+        needs_work = (not section.body.strip()) or section.word_count < target * _WRITER_FILL_RATIO
+        if needs_work or section.id in targeted:
+            parts.append(f"## {section.title}\n{section.body.strip() or '_(empty)_'}")
+        else:
+            parts.append(f"## {section.title}\n(unchanged, {section.word_count} words "
+                         "- do not resend this section in your output)")
+    return truncate_to_tokens(f"# {draft.title}\n\n" + "\n\n".join(parts), max_tokens)
+
+
 def outline_block(brief) -> str:
     lines = [f"title: {brief.title}", f"objective: {brief.objective}",
              f"audience: {brief.audience}", f"mode: {brief.mode.value}",
@@ -353,6 +386,13 @@ class MemoryStore:
                      draft_required: bool) -> AssembledContext:
         """Assemble the bounded context for one agent call."""
         agent_budget = budget.agent(agent_id)
+        if agent_id == "writer":
+            # Delta packet: full text only for sections the Writer may change.
+            draft_text_fn = lambda: writer_delta_block(brief, draft, self.open_findings,
+                                                       max_tokens=agent_budget.max_input_tokens // 2)
+        else:
+            draft_text_fn = lambda: draft_block(draft, max_tokens=agent_budget.max_input_tokens // 2)
+        agent_budget = budget.agent(agent_id)
         header = (
             f"agent: {agent_id} | iteration: {iteration} | task: {brief.task_id}\n"
             f"context_hard_cap: {budget.context_hard_cap} tokens | "
@@ -362,7 +402,7 @@ class MemoryStore:
         blocks = [
             Block(1, "system_rules_digest", rules_digest, required=True),
             Block(2, "task_brief", outline_block(brief), required=True),
-            Block(3, "master_draft", draft_block(draft, max_tokens=agent_budget.max_input_tokens // 2),
+            Block(3, "master_draft", draft_text_fn(),
                   required=draft_required),
             Block(4, "open_findings", findings_block(self.open_findings), required=False),
             Block(5, "rolling_history", self.rolling.render() or "no prior iterations",

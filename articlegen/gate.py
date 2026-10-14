@@ -17,8 +17,6 @@ from .models import (
     Draft,
     Finding,
     GateResult,
-    Mode,
-    Section,
     Severity,
 )
 

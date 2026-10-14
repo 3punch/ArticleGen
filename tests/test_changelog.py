@@ -1,5 +1,3 @@
-import os
-
 from articlegen.changelog import ChangeLog, read_jsonl
 from articlegen.gate import verify_brief
 from articlegen.models import AgentReport, AgentStatus, Finding, IterationRecord, Severity

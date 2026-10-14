@@ -11,7 +11,7 @@ anything about them (rule R9).
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from ..llm import coerce_findings
@@ -64,7 +64,8 @@ class Tester(BaseAgent):
     draft_required = True
 
     def deterministic(self, brief: Brief, draft: Draft, iteration: int,
-                      peer_reports: List[AgentReport]) -> Dict[str, Any]:
+                      peer_reports: List[AgentReport],
+                      open_findings: Optional[List[Finding]] = None) -> Dict[str, Any]:
         findings: List[Finding] = []
 
         def add(finding: Finding, category_count: Dict[str, int]) -> None:

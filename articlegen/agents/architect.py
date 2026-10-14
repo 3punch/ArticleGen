@@ -8,10 +8,10 @@ calls stay ``auto_fixable=False`` and are deferred instead.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..llm import coerce_findings
-from ..models import AgentReport, AgentStatus, Brief, Draft, Finding, Section, Severity
+from ..models import AgentReport, AgentStatus, Brief, Draft, Finding, Severity
 from .base import BaseAgent
 
 H1_IN_BODY_RE = re.compile(r"^#{1,2}\s+", re.MULTILINE)
@@ -26,7 +26,8 @@ class Architect(BaseAgent):
     draft_required = False
 
     def deterministic(self, brief: Brief, draft: Draft, iteration: int,
-                      peer_reports: List[AgentReport]) -> Dict[str, Any]:
+                      peer_reports: List[AgentReport],
+                      open_findings: Optional[List[Finding]] = None) -> Dict[str, Any]:
         findings: List[Finding] = []
         brief_ids = brief.section_ids
         draft_ids = [s.id for s in draft.sections]

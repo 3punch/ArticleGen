@@ -8,7 +8,7 @@ real-time instead of appearing all at once when the run finishes.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import streamlit as st

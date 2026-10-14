@@ -81,17 +81,21 @@ class TokenBudget:
 
     @classmethod
     def default(cls) -> "TokenBudget":
+        # Defaults tuned for minimum spend: a tighter context cap means the
+        # priority eviction never sends anything borderline to the provider,
+        # and per-agent input caps keep the repeated digest + draft blocks
+        # from dominating the bill. Eviction is always auditable in the log.
         return cls(
-            context_hard_cap=6000,
-            context_soft_warn=4800,
-            run_token_ceiling=60000,
+            context_hard_cap=4800,
+            context_soft_warn=3800,
+            run_token_ceiling=42000,
             reserve_for_response=2000,
             agents={
-                "writer": AgentBudget("writer", 2400, 2000),
-                "tester": AgentBudget("tester", 2200, 900),
-                "reviewer": AgentBudget("reviewer", 2200, 900),
-                "architect": AgentBudget("architect", 2000, 800),
-                "synthesizer": AgentBudget("synthesizer", 2600, 2200),
+                "writer": AgentBudget("writer", 2000, 2000),
+                "tester": AgentBudget("tester", 2000, 800),
+                "reviewer": AgentBudget("reviewer", 2000, 800),
+                "architect": AgentBudget("architect", 1800, 700),
+                "synthesizer": AgentBudget("synthesizer", 2400, 2200),
             },
         )
 

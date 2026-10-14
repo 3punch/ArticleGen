@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .models import AgentReport, Brief, Draft, Finding, GateResult, Severity
+from .models import AgentReport, Brief, Draft, Finding, GateResult
 
 WEIGHTS = {
     "correctness": 0.35,

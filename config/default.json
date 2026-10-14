@@ -7,16 +7,16 @@
   "workspace": "runs",
   "changelog_path": "change_log.md",
   "token_budget": {
-    "context_hard_cap": 6000,
-    "context_soft_warn": 4800,
-    "run_token_ceiling": 60000,
+    "context_hard_cap": 4800,
+    "context_soft_warn": 3800,
+    "run_token_ceiling": 42000,
     "reserve_for_response": 2000,
     "agents": {
-      "writer": { "max_input_tokens": 2400, "max_output_tokens": 2000 },
-      "tester": { "max_input_tokens": 2200, "max_output_tokens": 900 },
-      "reviewer": { "max_input_tokens": 2200, "max_output_tokens": 900 },
-      "architect": { "max_input_tokens": 2000, "max_output_tokens": 800 },
-      "synthesizer": { "max_input_tokens": 2600, "max_output_tokens": 2200 }
+      "writer": { "max_input_tokens": 2000, "max_output_tokens": 2000 },
+      "tester": { "max_input_tokens": 2000, "max_output_tokens": 800 },
+      "reviewer": { "max_input_tokens": 2000, "max_output_tokens": 800 },
+      "architect": { "max_input_tokens": 1800, "max_output_tokens": 700 },
+      "synthesizer": { "max_input_tokens": 2400, "max_output_tokens": 2200 }
     }
   }
 }

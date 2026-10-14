@@ -8,7 +8,7 @@ reported with their values, so a finding can be checked by hand.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..llm import coerce_findings
 from ..models import AgentReport, AgentStatus, Brief, Draft, Finding, Severity
@@ -49,7 +49,8 @@ class Reviewer(BaseAgent):
     draft_required = True
 
     def deterministic(self, brief: Brief, draft: Draft, iteration: int,
-                      peer_reports: List[AgentReport]) -> Dict[str, Any]:
+                      peer_reports: List[AgentReport],
+                      open_findings: Optional[List[Finding]] = None) -> Dict[str, Any]:
         findings: List[Finding] = []
         counts: Dict[str, int] = {}
 

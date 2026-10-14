@@ -11,7 +11,7 @@ end, and its behaviour is checkable by tests rather than dependent on a model ca
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ..llm import LLMClient, ProviderError, ResponseParseError, parse_json
 from ..memory import AssembledContext
@@ -52,10 +52,31 @@ class BaseAgent:
         return f"{self.digest}\n\n---\n\n{self.template}"
 
     # -- execution --------------------------------------------------------
+    def should_skip(self, brief: Brief, draft: Draft, peer_reports: List[AgentReport],
+                    open_findings: Optional[List[Finding]] = None) -> Optional[str]:
+        """Return a human-readable skip reason when this agent has no work left.
+
+        A skipped agent never reaches the provider - the cheapest token is the
+        one never spent - and still produces a report so the change log, the
+        event stream and the dashboard keep recording the mandatory order.
+        Returns ``None`` when the agent must run.
+        """
+        return None
+
     def run(self, context: AssembledContext, brief: Brief, draft: Draft, iteration: int,
-            peer_reports: Optional[List[AgentReport]] = None) -> AgentReport:
+            peer_reports: Optional[List[AgentReport]] = None,
+            open_findings: Optional[List[Finding]] = None) -> AgentReport:
         """Run one agent turn against an already-assembled context packet."""
         system = self.system_prompt()
+        reports = peer_reports or []
+        skip_reason = self.should_skip(brief, draft, reports, open_findings)
+        if skip_reason:
+            return self.base_report(
+                iteration=iteration, status=AgentStatus.OK,
+                notes=[f"skipped: {skip_reason}; zero tokens spent"],
+                engine="skipped", tokens_in=0, tokens_out=0, findings=[],
+                summary=f"skipped: {skip_reason}", payload={"skipped": skip_reason},
+            )
         tokens_in = context.tokens + count_tokens(system)
         agent_budget = self.budget.agent(self.agent_id)
         status = AgentStatus.OK
@@ -84,10 +105,12 @@ class BaseAgent:
                 status = AgentStatus.DEGRADED
                 notes.append(f"provider unavailable/unparseable, fell back to deterministic engine: {exc}")
                 engine = "heuristic"
-                payload = self.deterministic(brief, draft, iteration, peer_reports or [])
+                payload = self.deterministic(brief, draft, iteration, peer_reports or [],
+                                             open_findings=open_findings)
         else:
             engine = "offline-heuristic"
-            payload = self.deterministic(brief, draft, iteration, peer_reports or [])
+            payload = self.deterministic(brief, draft, iteration, peer_reports or [],
+                                         open_findings=open_findings)
 
         report = self.compose(
             payload=payload,
@@ -105,7 +128,8 @@ class BaseAgent:
 
     # -- subclass hooks ---------------------------------------------------
     def deterministic(self, brief: Brief, draft: Draft, iteration: int,
-                      peer_reports: List[AgentReport]) -> Dict[str, Any]:
+                      peer_reports: List[AgentReport],
+                      open_findings: Optional[List[Finding]] = None) -> Dict[str, Any]:
         """Produce the same payload an LLM would, using rule-based analysis."""
         raise NotImplementedError
 

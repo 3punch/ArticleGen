@@ -192,6 +192,55 @@ def test_synthesizer_restores_missing_outline_sections(agents, valid_brief):
     assert [s.id for s in new_draft.sections] == valid_brief.section_ids
 
 
+def test_writer_skips_when_there_is_no_work(valid_brief, agents):
+    draft = Draft.from_brief(valid_brief)
+    for section in draft.sections:
+        section.body = "Prose. " * 300
+    writer = agents["writer"]
+    reason = writer.should_skip(valid_brief, draft, [], [])
+    assert reason is not None
+    report = writer.run(
+        __import__("articlegen.memory", fromlist=["AssembledContext"]).AssembledContext(text="c", tokens=1),
+        valid_brief, draft, 2,
+    )
+    assert report.tokens_in == 0 and report.tokens_out == 0
+    assert any("skipped" in note for note in report.notes)
+    assert not writer.should_skip(valid_brief, Draft.from_brief(valid_brief), [], [])
+
+
+def test_mechanical_polish_preserves_paragraphs_and_lines(valid_brief, agents):
+    draft = Draft.from_brief(valid_brief)
+    payload = agents["writer"].deterministic(valid_brief, draft, 1, [])
+    for item in payload["sections"]:
+        body = item["body"]
+        polished, ops = __import__("articlegen.agents.writer", fromlist=["apply_mechanical_polish"]).apply_mechanical_polish(body)
+        # Convergence: polishing an already-polished body changes nothing.
+        again, _ = __import__("articlegen.agents.writer", fromlist=["apply_mechanical_polish"]).apply_mechanical_polish(polished)
+        assert again == polished
+        # Paragraph count can only grow, never merge.
+        assert polished.count("\n\n") >= body.count("\n\n")
+        # The gate's 400-character line limit is respected.
+        assert all(len(line) <= 420 for line in polished.split("\n\n"))
+
+
+def test_sections_open_on_distinct_sentences(valid_brief, agents):
+    draft = Draft.from_brief(valid_brief)
+    payload = agents["writer"].deterministic(valid_brief, draft, 1, [])
+    openings = [item["body"].split(".")[0] for item in payload["sections"]]
+    assert len(openings) == len(valid_brief.sections)
+    assert len({s.lower() for s in openings}) == len(openings), openings
+
+
+def test_writer_delta_block_hides_unchanged_sections(valid_brief):
+    from articlegen.memory import writer_delta_block
+    draft = Draft.from_brief(valid_brief)
+    for section in draft.sections:
+        section.body = "Established prose that needs no further work this run. " * 40
+    block = writer_delta_block(valid_brief, draft, [], max_tokens=2000)
+    assert block.count("unchanged,") == len(draft.sections)
+    assert "Established prose" not in block
+
+
 def test_agent_run_marks_degraded_when_provider_fails(valid_brief):
     class _BrokenClient(OfflineClient):
         available = True

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from ..models import AgentReport, AgentStatus, Brief, Draft, Finding, Section, Severity
 from .base import BaseAgent
 from .reviewer import FILLER_PATTERNS
-from .writer import scaffold_body
+from .writer import apply_mechanical_polish, scaffold_body
 
 CONTRACTIONS = {
     "don't": "do not", "doesn't": "does not", "didn't": "did not",
@@ -60,7 +60,8 @@ class Synthesizer(BaseAgent):
     draft_required = True
 
     def deterministic(self, brief: Brief, draft: Draft, iteration: int,
-                      peer_reports: List[AgentReport]) -> Dict[str, Any]:
+                      peer_reports: List[AgentReport],
+                      open_findings: Optional[List[Finding]] = None) -> Dict[str, Any]:
         brief_map = {s.id: s for s in brief.sections}
         working: Dict[str, Section] = {
             s.id: Section(id=s.id, title=s.title, purpose=s.purpose, body=s.body,
@@ -166,6 +167,16 @@ class Synthesizer(BaseAgent):
             if fixes:
                 section.body = _apply_text_fixes(section.body, fixes)
 
+        # -- 5b. Shared mechanical polish -------------------------------
+        # Runs every iteration on every section: it is measured, converging
+        # (once applied the same finding does not reproduce) and it stops the
+        # Reviewer from re-raising rhythm defects the fixes already settle.
+        for section_id, section in working.items():
+            polished, operations = apply_mechanical_polish(section.body)
+            if operations:
+                section.body = polished
+                applied.append(f"polish:{'+'.join(operations)}@{section_id}")
+
         # -- 6. Emit in canonical outline order -------------------------
         ordered = [working[sid].to_dict() for sid in brief.section_ids if sid in working]
         return {
@@ -182,7 +193,8 @@ class Synthesizer(BaseAgent):
 
     def compose(self, *, payload: Dict[str, Any], brief: Brief, draft: Draft, iteration: int,
                 status: AgentStatus, notes: List[str], engine: str, tokens_in: int,
-                tokens_out: int, peer_reports: List[AgentReport]) -> AgentReport:
+                tokens_out: int, peer_reports: List[AgentReport],
+                open_findings: Optional[List[Finding]] = None) -> AgentReport:
         sections = payload.get("sections") or []
         return self.base_report(
             iteration=iteration, status=status, notes=notes, engine=engine,

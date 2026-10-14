@@ -155,16 +155,37 @@ The script ships inside the package (not as a repo-root file) so `articlegen ui`
 ## Token & memory management
 
 This is the part that keeps a long loop from degrading. It is enforced in code, not by
-convention:
+convention, and tuned for minimum spend:
 
 | Control | Default | Where |
 | ------- | ------- | ----- |
-| Context hard cap per agent call | 6000 tokens | `TokenBudget.context_hard_cap` |
-| Soft warning threshold | 4800 tokens | `TokenBudget.context_soft_warn` |
-| Per-agent input/output ceilings | 2000–2600 / 800–2200 | `TokenBudget.agents` |
-| Whole-run token ceiling | 60000 tokens | `TokenBudget.run_token_ceiling` |
+| Context hard cap per agent call | 4800 tokens | `TokenBudget.context_hard_cap` |
+| Soft warning threshold | 3800 tokens | `TokenBudget.context_soft_warn` |
+| Per-agent input/output ceilings | 1800–2400 / 700–2200 | `TokenBudget.agents` |
+| Whole-run token ceiling | 42000 tokens | `TokenBudget.run_token_ceiling` |
 | Open findings retained | 40 max | `MemoryStore.absorb_findings` |
 | Rolling history retained | 8 entries / 450 tokens | `RollingMemory` |
+
+### Token-saving mechanisms
+
+Three levers keep the run's spend at the floor without touching quality:
+
+* **Idle agents never run.** When the Writer has no section under target and no open
+  finding inside its remit, `BaseAgent.should_skip` drops the provider call entirely —
+  the report records `engine=skipped`, zero tokens, and the dashboard shows the agent
+  as ⚫ skipped. On a converged draft this zeroes one of five calls per iteration.
+* **The Writer receives a delta packet.** After the first iteration it sees full text
+  only for sections it is allowed to change (under target or named in an open
+  finding); untouched sections are reduced to one `(unchanged, N words)` attestation.
+  Its context falls from O(draft) to O(needed work).
+* **Repairs converge.** Reviewer findings that land inside the Writer's remit are
+  fixed mechanically (filler removal, long-sentence/paragraph splitting,
+  contraction expansion, word dedup) instead of re-generating the same scaffold —
+  so a finding resolves the iteration after it appears rather than pacing the loop.
+
+On the bundled demo these levers turn a 27,050-token estimate into ~23,000, and the
+converging iteration drops roughly a quarter — before the budget caps that
+hard-limit real provider calls are accounted for.
 
 **Priority eviction.** A context packet is assembled from prioritised blocks; when the
 cap would be breached, low-priority blocks are dropped and the eviction is written to
@@ -261,10 +282,13 @@ tests/                 # 93 tests: gate, agents, memory, loop, dashboard
 
 The offline engine is **not** a model. It runs genuine checks — Python blocks are
 actually compiled, anchors are actually resolved, metric contradictions are actually
-detected — and its Writer emits clearly labelled scaffold prose derived from the brief
-rather than invented facts. It exists so the loop, the budgets, the scoring and the
-convergence logic are testable and runnable without credentials. Every report and
-change-log line names the engine that produced it.
+detected — and its Writer drafts role-composed professional prose from the brief:
+paragraphs are built from framing → audience → method → integrity → risk → payoff
+sentence pools with a no-repeat guarantee per section, distinct section openings, a
+closing takeaway, and a brief-objective anchor quoted in the first drafted section.
+It exists so the loop, the budgets, the scoring and the convergence logic are
+testable and runnable without credentials. Every report and change-log line names
+the engine that produced it.
 
 **Verification status:** the offline path is covered by the test suite and a full
 end-to-end run. The two network clients are implemented but were not exercised against

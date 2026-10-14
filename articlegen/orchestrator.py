@@ -232,7 +232,8 @@ class Orchestrator:
             store.write_text(iteration, f"context-{agent.agent_id}.txt", packet.text)
 
             if agent.agent_id != "synthesizer":
-                report = agent.run(packet, brief, draft, iteration, peer_reports=reports)
+                report = agent.run(packet, brief, draft, iteration, peer_reports=reports,
+                                   open_findings=store.open_findings)
                 reports.append(report)
                 store.write_json(iteration, f"report-{agent.agent_id}.json", report.to_dict())
                 store.absorb_findings(report.findings)
@@ -241,10 +242,10 @@ class Orchestrator:
                                       len(packet.evicted), packet.tokens)
                 continue
 
-            # Synthesizer sees this iteration's findings, not raw transcripts.
-            report = agent.run(packet, brief, draft, iteration, peer_reports=reports)
+            report = agent.run(packet, brief, draft, iteration, peer_reports=reports,
+                               open_findings=store.open_findings)
             reports.append(report)
-            store.write_json(iteration, f"report-synthesizer.json", report.to_dict())
+            store.write_json(iteration, "report-synthesizer.json", report.to_dict())
             tokens_used += report.tokens_in + report.tokens_out
 
             new_draft = build_draft(report.payload, brief, draft.version)

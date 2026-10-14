@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from ..events import EventType, PipelineEvent
+from ..events import PipelineEvent
 
 #: The mandatory order from claude.md. The tracker renders in this order regardless
 #: of the order events arrive in.
@@ -202,7 +202,12 @@ class TrackerState:
         if view is not None:
             payload = event.payload
             status = str(payload.get("status", "ok"))
-            view.state = "degraded" if status in ("degraded", "failed") else "done"
+            if str(payload.get("engine", "")) == "skipped":
+                view.state = "skipped"
+            elif status in ("degraded", "failed"):
+                view.state = "degraded"
+            else:
+                view.state = "done"
             view.role = payload.get("role", view.role)
             view.findings = int(payload.get("findings", 0))
             view.blockers = int(payload.get("blockers", 0))

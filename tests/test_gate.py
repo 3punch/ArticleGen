@@ -1,8 +1,6 @@
 import json
 import os
 
-import pytest
-
 from articlegen.gate import verify_brief, verify_draft
 from articlegen.models import Brief, Draft, Section, Severity
 

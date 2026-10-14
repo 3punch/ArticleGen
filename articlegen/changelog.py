@@ -108,7 +108,7 @@ class ChangeLog:
         lines = [
             f"## [{utc_now()}] GATE ROUTE-BACK · task={task_id} · stage={gate.stage}",
             "",
-            f"- decision: **ROUTE_BACK** (no sub-agent tokens spent)",
+            "- decision: **ROUTE_BACK** (no sub-agent tokens spent)",
             f"- reason: {gate.reason}",
             f"- checks run: {', '.join(gate.checks_run)}",
             "",
