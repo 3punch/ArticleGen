@@ -797,3 +797,31 @@ class WorkflowEventRecord(ContractModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("created_at must include a timezone")
         return value
+
+
+class WorkflowTaskLogRecord(ContractModel):
+    """Bounded task-scoped agent output for the progress-view log drawer."""
+
+    audit_run_id: UUID
+    workflow_id: UUID
+    task_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    agent_name: Literal["coder", "tester", "debugger"]
+    phase: str = Field(min_length=1, max_length=32)
+    action: str = Field(min_length=1, max_length=200)
+    status: str | None = Field(default=None, max_length=80)
+    summary: str | None = Field(default=None, max_length=4000)
+    timestamp: datetime
+    provider: str | None = Field(default=None, max_length=80)
+    model: str | None = Field(default=None, max_length=200)
+    tokens_used: StrictInt = Field(ge=0)
+    spend: Decimal = Field(ge=Decimal("0"), max_digits=16, decimal_places=8)
+    evidence: list[str] = Field(default_factory=list, max_length=100)
+    stdout: str = Field(default="", max_length=12_000)
+    stderr: str = Field(default="", max_length=12_000)
+
+    @field_validator("timestamp")
+    @classmethod
+    def task_log_timestamp_must_be_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("task log timestamp must include a timezone")
+        return value

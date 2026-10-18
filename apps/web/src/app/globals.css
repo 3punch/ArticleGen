@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --pf-ink: #192331;
+  --pf-muted: #627083;
+  --pf-border: #dce3eb;
+  --pf-panel: #ffffff;
+  --pf-canvas: #f5f7fa;
+  --pf-accent: #4058c8;
+  --pf-accent-dark: #3046ae;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--pf-canvas);
+  color: var(--pf-ink);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 3px solid rgb(64 88 200 / 30%);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: rgb(64 88 200 / 18%);
+}

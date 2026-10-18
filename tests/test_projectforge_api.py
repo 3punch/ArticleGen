@@ -277,6 +277,14 @@ def test_review_api_exposes_plan_and_diff_and_routes_rejections_back_to_work(tmp
         assert final_review.json()["review"] is None  # explicit test stub has no itemized verdict
 
         task_id = final_gate.result_payload["plan"]["task_graph"]["nodes"][0]["id"]
+        task_logs = client.get(f"/api/workflows/{workflow_id}/tasks/{task_id}/logs")
+        assert task_logs.status_code == 200, task_logs.text
+        assert {record["agent_name"] for record in task_logs.json()} == {"coder", "tester"}
+        assert all(record["task_id"] == task_id for record in task_logs.json())
+        assert all(record["timestamp"].endswith("Z") or "+00:00" in record["timestamp"]
+                   for record in task_logs.json())
+        assert client.get(f"/api/workflows/{workflow_id}/tasks/missing/logs").status_code == 404
+
         changes_requested = client.post(f"/api/workflows/{workflow_id}/approvals", json={
             "stage": "final",
             "decision": "request_changes",

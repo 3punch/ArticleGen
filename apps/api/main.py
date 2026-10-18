@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from projectforge_api.db import build_engine, configured_database_url, make_session_factory
 from projectforge_api.orm import (
+    AgentRunRow,
     Base,
     BudgetLedgerRow,
     Project,
@@ -40,6 +41,7 @@ from projectforge_schemas.models import (
     WorkflowPackageExport,
     WorkflowReviewBundle,
     WorkflowRunRecord,
+    WorkflowTaskLogRecord,
     WorkflowStartRequest,
 )
 from projectforge_orchestrator.engine import (
@@ -526,6 +528,81 @@ def create_app(*, database_url: Optional[str] = None,
             return workflow.list_events(workflow_id)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/workflows/{workflow_id}/tasks/{task_id}/logs",
+        response_model=list[WorkflowTaskLogRecord],
+    )
+    def get_workflow_task_logs(
+        workflow_id: uuid.UUID,
+        task_id: str,
+        limit: int = Query(default=100, ge=1, le=200),
+        session: Session = Depends(get_db),
+    ):
+        workflow = require_workflow_engine()
+        try:
+            run = workflow.get(workflow_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if run.task_graph_id is None or session.get(TaskNodeRow, (run.task_graph_id, task_id)) is None:
+            raise HTTPException(status_code=404, detail="task not found for workflow")
+        rows = session.scalars(
+            select(AgentRunRow)
+            .where(
+                AgentRunRow.workflow_id == workflow_id,
+                AgentRunRow.agent_name.in_(["coder", "tester", "debugger"]),
+                AgentRunRow.input_payload["task_id"].as_string() == task_id,
+            )
+            .order_by(AgentRunRow.timestamp.desc(), AgentRunRow.id.desc())
+            .limit(limit)
+        ).all()
+        records: list[WorkflowTaskLogRecord] = []
+        actions = {
+            "coder": "Code change",
+            "tester": "Sandbox test",
+            "debugger": "Debug guidance",
+        }
+        for row in reversed(rows):
+            input_payload = row.input_payload or {}
+            output = row.output_payload or {}
+            task_node = input_payload.get("task_node")
+            task_node_id = task_node.get("id") if isinstance(task_node, dict) else None
+            recorded_task_id = output.get("task_id") or input_payload.get("task_id") or task_node_id
+            if recorded_task_id != task_id:
+                continue
+            phase = str(output.get("phase") or input_payload.get("phase") or row.agent_name.upper())
+            status_value = output.get("status")
+            if row.agent_name == "tester" and isinstance(output.get("passed"), bool):
+                status_value = "passed" if output["passed"] else "failed"
+            summary_value = (
+                output.get("summary") or output.get("diagnosis")
+                or output.get("fix_instructions")
+            )
+            evidence_value = output.get("evidence", [])
+            if not isinstance(evidence_value, list):
+                evidence_value = [str(evidence_value)]
+            timestamp = row.timestamp
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            records.append(WorkflowTaskLogRecord(
+                audit_run_id=row.id,
+                workflow_id=workflow_id,
+                task_id=task_id,
+                agent_name=row.agent_name,
+                phase=phase[:32],
+                action=actions[row.agent_name],
+                status=str(status_value)[:80] if status_value is not None else None,
+                summary=str(summary_value)[:4000] if summary_value is not None else None,
+                timestamp=timestamp,
+                provider=row.provider,
+                model=row.model,
+                tokens_used=row.tokens_used,
+                spend=row.cost,
+                evidence=[str(item)[:2000] for item in evidence_value[:100]],
+                stdout=str(output.get("stdout", ""))[-12_000:],
+                stderr=str(output.get("stderr", ""))[-12_000:],
+            ))
+        return records
 
     @app.get("/api/workflows/{workflow_id}/review", response_model=WorkflowReviewBundle)
     def get_workflow_review_bundle(workflow_id: uuid.UUID):

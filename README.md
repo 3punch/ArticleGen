@@ -300,16 +300,16 @@ the live APIs.
 
 ## CI
 
-`.github/workflows/pipeline.yml` runs the test suite, verifies that the shipped valid
-brief passes the gate and the shipped invalid brief is routed back, confirms all prompt
-templates and the rules digest load, then executes the orchestrated loop and uploads
-`runs/` as an artefact. `workflow_dispatch` accepts a brief path, iteration count and
-provider; add `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` as a repository secret to run
-against a real model.
+`.github/workflows/pipeline.yml` runs the Python suite and Docker-backed sandbox/E2E
+tests, typechecks and builds the Next.js workspace, verifies the valid/invalid example
+briefs and prompt templates, then executes the orchestrated loop and uploads `runs/` as
+an artefact. `workflow_dispatch` accepts a brief path, iteration count and provider;
+add `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` as a repository secret to run against a
+real model.
 
 ---
 
-## ProjectForge — Phases 1–5
+## ProjectForge — Phases 1–7
 
 Phase 1 established shared Pydantic contracts, PostgreSQL persistence, Alembic
 migrations, and the FastAPI CRUD surface. Phase 2 added a durable Postgres-backed FSM,
@@ -325,13 +325,16 @@ Coder, Tester, and Debugger stubs in `BUILD_LOOP`: task-scoped code changes and 
 tests are committed to a per-project Git repository, tests run in the isolated Python
 or Node sandbox, and bounded Debugger guidance is fed into each Coder retry. Normalized
 ProjectSpec facts are chunked and retrieved from PostgreSQL pgvector, so Coder receives
-only the top relevant excerpts rather than the entire specification. Orchestration and
-control flow remain deterministic code; no LLM chooses state transitions. Integration,
-review, and packaging remain stubs. The workflow engine is
-exposed through a swappable `WorkflowEngine` interface. Production tables are not
-created on API startup; apply the Alembic migrations explicitly. The API defaults to
-loopback because authentication is not configured and must not be exposed publicly
-without an authenticated deployment.
+only the top relevant excerpts rather than the entire specification. Phase 6 adds the
+evidence-bearing Reviewer, task-scoped human rework decisions, deterministic integration
+checks, README/report generation, audit-trail AI-usage disclosure, and bounded ZIP
+export. Phase 7 adds the Next.js + Tailwind human workspace for clarification, plan and
+final-review checkpoints, live task progress/logs, and package download. Orchestration
+and control flow remain deterministic code; no LLM chooses state transitions. The
+workflow engine is exposed through a swappable `WorkflowEngine` interface. Production
+tables are not created on API startup; apply the Alembic migrations explicitly. The API
+defaults to loopback because authentication is not configured and must not be exposed
+publicly without an authenticated deployment.
 
 ### Install and start PostgreSQL locally
 
@@ -346,6 +349,24 @@ projectforge-api
 # In another terminal, with the same environment:
 projectforge-worker
 ```
+
+### Run the Next.js workspace
+
+In another terminal, set the server-side API target and start the web app:
+
+```bash
+cd apps/web
+npm ci
+cp .env.example .env.local
+npm run dev
+```
+
+The browser uses same-origin `/api/...` calls; Next.js proxies them to the FastAPI
+origin configured by `PROJECTFORGE_API_URL` (default `http://127.0.0.1:8000`). For a
+container network, point it at the API service name instead. The frontend requires the
+API, PostgreSQL, Redis/RQ worker, and configured ProjectForge agents for workflow
+actions; it does not substitute local mock execution when those services are absent.
+The Next.js dev server binds to `0.0.0.0` for the workspace preview.
 
 ### Model-backed agent configuration
 
@@ -367,7 +388,8 @@ export PROJECTFORGE_LLM_BASE_URL='https://inference.dahl.global/v1'
 `PROJECTFORGE_LLM_MODEL` can set the shared exact model ID directly. These optional
 variables override it per agent: `PROJECTFORGE_REQUIREMENT_MODEL`,
 `PROJECTFORGE_PLANNER_MODEL`, `PROJECTFORGE_CODER_MODEL`, `PROJECTFORGE_TESTER_MODEL`,
-and `PROJECTFORGE_DEBUGGER_MODEL`. `PROJECTFORGE_LLM_ROUTE_PREFIX` defaults to
+`PROJECTFORGE_DEBUGGER_MODEL`, `PROJECTFORGE_REVIEWER_MODEL`, and
+`PROJECTFORGE_PACKAGER_MODEL`. `PROJECTFORGE_LLM_ROUTE_PREFIX` defaults to
 LiteLLM's `openai` adapter for Dahl's OpenAI-compatible endpoint. Model responses are
 locally validated against strict Pydantic contracts; structured provider output is not
 assumed.
@@ -481,6 +503,24 @@ asserts the generated tests pass in the isolated sandbox and checks the final pr
 repository. That live test skips locally without Docker and is required by CI alongside
 the Phase 4 sandbox suite.
 
+### Phase 6 reviewer, human gates, and packaging
+
+The Reviewer assesses automatable rubric items using bounded source/test evidence and
+static Python parsing. Subjective items remain `human_review_required`, with a
+recommendation and evidence for the human reviewer; they are never persisted as a
+machine pass. The approval API returns rejected plans to `PLAN` and routes final
+change requests to `BUILD_LOOP` with feedback attached to selected TaskNodes and
+relevant dependents. The Packager commits a README and Markdown report to the project
+Git workspace; the ZIP includes test/review evidence, the disclosure in Markdown and
+JSON, a checksum manifest, and no Git metadata or excluded workspace files. The final
+package download endpoint verifies the persisted size and SHA-256 before serving it.
+
+`tests/test_projectforge_phase6_e2e.py` exercises all three Phase 3 fixtures through
+both human gates and asserts the downloadable bundle contains README, report,
+disclosure, tests, and passing test evidence. Its Docker-backed test is mandatory in
+CI; offline API/workflow/package tests use an explicit sandbox stub and do not execute
+project code.
+
 ### CRUD surface
 
 - `POST /api/projects` (accepts `raw_brief_text` and optional `rubric_text`, or a legacy validated `spec`), `GET /api/projects`, `GET /api/projects/{project_id}`
@@ -491,10 +531,13 @@ the Phase 4 sandbox suite.
 - `DELETE /api/projects/{project_id}/task-graphs/{graph_id}`
 - `POST /api/projects/{project_id}/workflows` (create and queue a run; a seed graph is optional)
 - `GET /api/workflows/{workflow_id}` and `GET .../events`
+- `GET /api/workflows/{workflow_id}/review` (current plan or final-review diff/checklist)
+- `GET /api/workflows/{workflow_id}/tasks/{task_id}/logs` (bounded coder/tester/debugger audit output)
 - `POST /api/workflows/{workflow_id}/clarifications` (resume a Requirement-agent clarification gate)
-- `POST /api/workflows/{workflow_id}/approvals` (`plan` or `final`)
+- `POST /api/workflows/{workflow_id}/approvals` (`plan` or `final`, with task-scoped rework feedback)
 - `POST /api/workflows/{workflow_id}/cancellation`
 - `POST /api/workflows/{workflow_id}/dispatch` (retry a persisted queue dispatch)
+- `GET /api/workflows/{workflow_id}/package/metadata` and `GET .../package` (integrity-checked ZIP download)
 - `GET /health`
 
 Task graph contracts reject duplicate IDs, missing dependencies, mismatched edges,
@@ -525,21 +568,25 @@ packages/agents/rag.py             ProjectSpec chunking and pgvector cosine retr
 packages/agents/git_workspace.py   Scoped per-project Git workspaces and agent commits
 packages/agents/litellm_client.py  Configured Dahl/OpenAI-compatible LiteLLM adapter
 packages/agents/langgraph_runner.py One-node linear LangGraph call; no control-flow decisions
-packages/agents/prompts/           Versioned Requirement/Planner/Coder/Tester/Debugger prompts
-packages/agents/stubs.py           Deterministic stubs for integration/review/packaging/tests
-packages/orchestrator/engine.py    Postgres FSM, build retries, clarification gates, DAG persistence
-packages/orchestrator/budget.py    Atomic provider budget reservations and settlement
-packages/orchestrator/scheduler.py Topological/resource-conflict task scheduler
-packages/orchestrator/queue.py    RQ/Redis dispatch adapter
-packages/sandbox/manager.py        Ephemeral Docker execution, limits, cleanup, and network policy
-packages/sandbox/egress_proxy.py   Allowlist-only HTTP(S) egress proxy
-infra/sandbox/                    Python/pytest, Node/Jest, and egress-proxy images
-apps/api/main.py                   FastAPI CRUD and workflow/approval endpoints
-apps/api/db.py                     Engine/session configuration
-apps/api/orm.py                    SQLAlchemy persistence mappings
-apps/api/cli.py                    Local API launcher (127.0.0.1 by default)
-infra/alembic.ini                  Alembic configuration
-infra/migrations/                  PostgreSQL migrations (Phases 1–5)
-infra/docker-compose.yml           Local Postgres/pgvector + Redis services
-tests/test_projectforge_*.py       Contract, API, persistence, scheduler, and FSM tests
+packages/agents/prompts/           Versioned agent prompts
+packages/agents/reviewer.py         Evidence-based rubric assessment and human-review recommendations
+packages/agents/packager.py         README and Markdown report generation
+packages/agents/package_export.py   Bounded, integrity-checked ZIP export and disclosure artifacts
+packages/agents/stubs.py            Deterministic test stubs; production roles use scoped agents
+packages/orchestrator/engine.py     Postgres FSM, build retries, human gates, and audit disclosure
+packages/orchestrator/budget.py     Atomic provider budget reservations and settlement
+packages/orchestrator/scheduler.py  Topological/resource-conflict task scheduler
+packages/orchestrator/queue.py      RQ/Redis dispatch adapter
+packages/sandbox/manager.py         Ephemeral Docker execution, limits, cleanup, and network policy
+packages/sandbox/egress_proxy.py    Allowlist-only HTTP(S) egress proxy
+apps/web/                            Next.js + Tailwind human workspace and same-origin API proxy
+apps/api/main.py                    FastAPI CRUD, workflow, approval, task-log, and export endpoints
+apps/api/db.py                      Engine/session configuration
+apps/api/orm.py                     SQLAlchemy persistence mappings
+apps/api/cli.py                     Local API launcher (127.0.0.1 by default)
+infra/sandbox/                      Python/pytest, Node/Jest, and egress-proxy images
+infra/alembic.ini                   Alembic configuration
+infra/migrations/                   PostgreSQL migrations (Phases 1–6)
+infra/docker-compose.yml            Local Postgres/pgvector + Redis services
+tests/test_projectforge_*.py        Contract, API, persistence, scheduler, FSM, and packaging tests
 ```

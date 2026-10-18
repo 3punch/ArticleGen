@@ -26,5 +26,11 @@ runs/
 .env.*
 !.env.example
 
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
 # OS noise
 .DS_Store
