@@ -684,6 +684,27 @@ class WorkflowApprovalRequest(ContractModel):
         return self
 
 
+class ReportGroundednessResult(ContractModel):
+    """Deterministic evidence checks run before the final human-review checkpoint."""
+
+    passed: StrictBool
+    required_terms: list[str] = Field(default_factory=list, max_length=100)
+    matched_terms: list[str] = Field(default_factory=list, max_length=100)
+    code_anchors: list[str] = Field(default_factory=list, max_length=100)
+    matched_code_anchors: list[str] = Field(default_factory=list, max_length=100)
+    test_anchors: list[str] = Field(default_factory=list, max_length=100)
+    matched_test_anchors: list[str] = Field(default_factory=list, max_length=100)
+    artifact_paths: list[str] = Field(default_factory=list, max_length=2000)
+    issues: list[str] = Field(default_factory=list, max_length=100)
+    regeneration_attempts: StrictInt = Field(default=0, ge=0, le=3)
+
+    @model_validator(mode="after")
+    def passed_must_match_issues(self) -> "ReportGroundednessResult":
+        if self.passed != (not self.issues):
+            raise ValueError("groundedness passed must be true exactly when issues are empty")
+        return self
+
+
 class WorkflowReviewBundle(ContractModel):
     workflow_id: UUID
     project_id: UUID
@@ -696,6 +717,7 @@ class WorkflowReviewBundle(ContractModel):
     diff_truncated: StrictBool = False
     review: ReviewerAgentResponse | None = None
     reviewer_summary: str | None = None
+    report_groundedness: ReportGroundednessResult | None = None
 
 
 class WorkflowPackageExport(ContractModel):

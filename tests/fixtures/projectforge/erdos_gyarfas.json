@@ -1,0 +1,117 @@
+{
+  "name": "erdos-gyarfas",
+  "raw_brief_text": "For a graph-theory project, implement a Python tool that validates finite undirected simple graphs, enumerates simple cycles without duplicate rotations or reversals, and reports cycle lengths that are powers of two. Use the Petersen graph as a cubic example with minimum degree at least 3; report its vertex count, edge count, minimum degree, detected cycle lengths, and power-of-two cycle lengths. Include tests and explain that a finite computation is evidence about this example, not a proof of the Erdős–Gyárfás conjecture. State the search's worst-case complexity honestly.",
+  "rubric_text": "1. Automated: For the Petersen graph, minimum degree is 3 and enumerated cycle lengths are 5, 6, 8, and 9, with length 8 in the power-of-two results. 2. Automated: Each undirected simple cycle is returned once under rotation and reversal; invalid adjacency inputs are rejected. 3. Human judgment: The report distinguishes the finite Petersen graph computation from a proof of the Erdős–Gyárfás conjecture and states worst-case complexity accurately.",
+  "expected_task_count": {"min": 4, "max": 6},
+  "requirement_response": {
+    "status": "completed",
+    "confidence": 0.95,
+    "project_spec": {
+      "title": "Erdős–Gyárfás Cycles in Cubic Graphs",
+      "description": "Implement a local Python graph-analysis tool that validates undirected simple graphs, enumerates simple cycles exactly once, and identifies cycle lengths that are powers of two. Use the Petersen graph, a cubic graph of minimum degree 3, as a finite case study and explain why the computation does not prove the Erdős–Gyárfás conjecture.",
+      "deliverables": [
+        "Python functions validate_simple_graph, enumerate_simple_cycles, and power_of_two_cycle_lengths for undirected simple graphs.",
+        "A Petersen-graph result artifact listing 10 vertices, 15 edges, minimum degree 3, cycle lengths 5, 6, 8, and 9, and power-of-two cycle length 8.",
+        "Automated tests for graph validation, cycle canonicalization, and the Petersen-graph result.",
+        "A README and report describing the cycle search, its worst-case complexity, the minimum-degree condition, power-of-two lengths, and the finite-example limitation."
+      ],
+      "constraints": [
+        "The graph input is finite, undirected, simple, and represented by symmetric adjacency lists without loops.",
+        "The project runs locally without network access or external graph libraries.",
+        "The Petersen-graph computation is a finite example and must not be described as a proof of the Erdős–Gyárfás conjecture.",
+        "State the worst-case complexity of the implemented simple-cycle search honestly."
+      ],
+      "tech_stack_hints": ["Python 3.11", "standard library", "pytest", "graph theory"],
+      "rubric_items": [
+        {
+          "criterion": "For the Petersen graph, minimum degree is 3 and enumerated cycle lengths are 5, 6, 8, and 9, with length 8 in the power-of-two results.",
+          "type": "automatable",
+          "check_method": "Run the fixed Petersen graph test and compare the vertex count, edge count, minimum degree, unique cycle lengths, and power-of-two cycle lengths with the stated values."
+        },
+        {
+          "criterion": "Each undirected simple cycle is returned once under rotation and reversal; invalid adjacency inputs are rejected.",
+          "type": "automatable",
+          "check_method": "Run tests that count canonical cycles and pass asymmetric, looped, and unknown-neighbor graphs to the graph validator."
+        },
+        {
+          "criterion": "The report distinguishes the finite Petersen graph computation from a proof of the Erdős–Gyárfás conjecture and states worst-case complexity accurately.",
+          "type": "human-judgment",
+          "check_method": "A graph-theory reviewer checks the finite-example limitation, minimum-degree premise, power-of-two cycle statement, and complexity discussion."
+        }
+      ]
+    },
+    "questions": [],
+    "uncertainties": []
+  },
+  "planner_response": {
+    "plan_summary": "Validate graph inputs, enumerate canonical simple cycles, calculate the Petersen graph's power-of-two cycle lengths, then test and document the finite result and complexity limit.",
+    "evidence": [
+      "The DAG covers undirected-simple-graph validation, duplicate-free cycle detection, Petersen graph counts and cycle lengths, regression tests, and a caveated complexity discussion."
+    ],
+    "task_graph": {
+      "nodes": [
+        {
+          "id": "validate-graph",
+          "description": "Implement validation and degree/edge-count helpers for finite undirected simple adjacency maps.",
+          "dependencies": [],
+          "acceptance_criteria": [
+            "Symmetric loop-free adjacency maps with known vertices are accepted, while loops, asymmetry, and unknown neighbors are rejected.",
+            "The Petersen fixture reports 10 vertices, 15 edges, and minimum degree 3."
+          ],
+          "assigned_agent": "coder",
+          "read_set": [],
+          "write_set": ["graphs"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "enumerate-cycles",
+          "description": "Enumerate simple cycles and canonicalize rotations and reversals so each undirected cycle appears once.",
+          "dependencies": ["validate-graph"],
+          "acceptance_criteria": [
+            "The Petersen graph has unique cycle lengths 5, 6, 8, and 9, and a cycle is not duplicated by a different start vertex or traversal direction."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["graphs"],
+          "write_set": ["graphs"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "analyze-petersen",
+          "description": "Compute the Petersen graph's cycle-length summary and write a machine-readable result artifact.",
+          "dependencies": ["enumerate-cycles"],
+          "acceptance_criteria": [
+            "The result artifact records minimum degree 3, cycle lengths 5, 6, 8, and 9, and power-of-two cycle length 8."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["graphs"],
+          "write_set": ["results"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "cycle-regressions",
+          "description": "Add fixed regression tests for graph validation, canonical cycle enumeration, and the Petersen result.",
+          "dependencies": ["analyze-petersen"],
+          "acceptance_criteria": [
+            "Tests assert the Petersen graph counts and power-of-two cycle length, plus rejection of invalid undirected graph inputs."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["graphs", "results"],
+          "write_set": ["tests"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "readme-and-limitations",
+          "description": "Document how to run the graph analysis, its exponential worst-case search, and why the finite Petersen result is not a conjecture proof.",
+          "dependencies": ["cycle-regressions"],
+          "acceptance_criteria": [
+            "The README names the actual graph module and test command, cites the Petersen result, and states the finite-example and complexity limitations."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["graphs", "results", "tests"],
+          "write_set": ["README.md"],
+          "timeout_seconds": 300
+        }
+      ]
+    }
+  }
+}

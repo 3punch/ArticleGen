@@ -41,6 +41,42 @@ export function FinalReviewPanel({ bundle, busy, onApprove, onRequestChanges }: 
         <StatusBadge status={bundle.state} />
       </header>
 
+      {bundle.report_groundedness && (
+        <section className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-emerald-950">Report groundedness</h2>
+              <p className="mt-1 text-xs leading-5 text-emerald-900">
+                Checked against {bundle.report_groundedness.matched_terms.length} ProjectSpec terms, {bundle.report_groundedness.matched_code_anchors.length} implementation anchors, and {bundle.report_groundedness.matched_test_anchors.length} test-evidence anchors before this checkpoint.
+                {bundle.report_groundedness.regeneration_attempts > 0 && ` Regenerated ${bundle.report_groundedness.regeneration_attempts} time${bundle.report_groundedness.regeneration_attempts === 1 ? "" : "s"}.`}
+              </p>
+              <p className="mt-2 text-xs leading-5 text-emerald-900">
+                Matched terms: {bundle.report_groundedness.matched_terms.slice(0, 8).join(", ") || "none"}.
+                {bundle.report_groundedness.matched_terms.length > 8 && ` +${bundle.report_groundedness.matched_terms.length - 8} more`}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-emerald-900">
+                Source: {bundle.report_groundedness.matched_code_anchors.slice(0, 3).join(", ") || "none"}; tests: {bundle.report_groundedness.matched_test_anchors.slice(0, 3).join(", ") || "none"}.
+              </p>
+            </div>
+            <StatusBadge status={bundle.report_groundedness.passed ? "passed" : "failed"} />
+          </div>
+          {bundle.report_groundedness.artifact_paths.length > 0 && (
+            <p className="mt-2 text-xs leading-5 text-emerald-900">
+              Repository evidence: {bundle.report_groundedness.artifact_paths.slice(0, 5).join(", ")}
+              {bundle.report_groundedness.artifact_paths.length > 5 && ` +${bundle.report_groundedness.artifact_paths.length - 5} more files`}
+            </p>
+          )}
+          {bundle.report_groundedness.issues.length > 0 && (
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-red-800">
+              {bundle.report_groundedness.issues.map((issue) => <li key={issue}>{issue}</li>)}
+            </ul>
+          )}
+          <p className="mt-2 text-xs text-emerald-900">
+            The README and report are included in the diff above so you can inspect them before approval.
+          </p>
+        </section>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(260px,0.6fr)]">
         <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">

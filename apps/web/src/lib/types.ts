@@ -106,6 +106,19 @@ export interface ReviewerAgentResponse {
   evidence: string[];
 }
 
+export interface ReportGroundednessResult {
+  passed: boolean;
+  required_terms: string[];
+  matched_terms: string[];
+  code_anchors: string[];
+  matched_code_anchors: string[];
+  test_anchors: string[];
+  matched_test_anchors: string[];
+  artifact_paths: string[];
+  issues: string[];
+  regeneration_attempts: number;
+}
+
 export interface WorkflowReviewBundle {
   workflow_id: string;
   project_id: string;
@@ -118,6 +131,7 @@ export interface WorkflowReviewBundle {
   diff_truncated: boolean;
   review: ReviewerAgentResponse | null;
   reviewer_summary: string | null;
+  report_groundedness: ReportGroundednessResult | null;
 }
 
 export interface WorkflowRunRecord {

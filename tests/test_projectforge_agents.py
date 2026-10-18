@@ -26,7 +26,7 @@ from projectforge_schemas.models import (
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "projectforge"
-FIXTURE_NAMES = ("simple_script", "web_app", "data_analysis")
+FIXTURE_NAMES = ("simple_script", "web_app", "data_analysis", "erdos_gyarfas")
 
 
 class FixtureModelClient:

@@ -223,6 +223,25 @@ class OfflineBuildModelClient:
                     "evidence": ["README.md: documents the command, CSV fields, and malformed-row behavior."],
                 } for item in human_items],
             }
+        elif agent_name == "packager":
+            payload = json.loads(user_prompt)
+            test_result = next(
+                (run["stdout"].strip().splitlines()[0]
+                 for run in payload["sandbox_test_results"] if run.get("stdout", "").strip()),
+                "sandbox result not present",
+            )
+            title = payload["project_spec"]["title"]
+            output = {
+                "readme_markdown": README_SOURCE,
+                "report_markdown": (
+                    f"# Project Report: {title}\n\n"
+                    "## CLI implementation\n\n`src/bicycle_summary.py` defines `summarize_csv` and `main` for the Python 3.11 CLI. It reads UTF-8 CSV input and validates CSV rows, required `date` and `count` columns, ISO dates, and nonnegative counts. Malformed rows are rejected with row numbers. The summary computes row count, total, mean, and maximum daily count, then writes deterministic JSON. The program requires no network access.\n\n"
+                    "## Verification\n\n`tests/test_bicycle_summary.py` recorded " + test_result
+                    + " in the supplied sandbox output (exit code 0). No coverage or performance measurement is claimed.\n"
+                ),
+                "summary": "Document the validated bicycle-count CLI and persisted test outcome.",
+                "evidence": ["README.md, src/bicycle_summary.py, tests/test_bicycle_summary.py, and persisted sandbox output were used."],
+            }
         else:
             raise AssertionError(f"unexpected model-backed role: {agent_name}")
         from projectforge_agents.litellm_client import ModelCompletion
