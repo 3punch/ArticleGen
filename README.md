@@ -148,7 +148,9 @@ The script ships inside the package (not as a repo-root file) so `articlegen ui`
 }
 ```
 
-`articlegen init brief.json` writes a commented template.
+`articlegen init brief.json` writes a starter JSON template with explicit `TODO`
+markers. The input gate routes it back until you replace those placeholders with
+article-specific content; run `articlegen verify brief.json` before generation.
 
 ---
 
@@ -267,7 +269,7 @@ prompts/               # the five agent prompt templates
 claude.md              # system rules (constitution) + Agent Digest
 config/default.json    # budgets, thresholds, iteration limits
 examples/              # a valid brief and an invalid one
-tests/                 # 93 tests: gate, agents, memory, loop, dashboard
+tests/                 # gate, agents, memory, loop, CLI and dashboard coverage
 ```
 
 ---
@@ -304,3 +306,240 @@ templates and the rules digest load, then executes the orchestrated loop and upl
 `runs/` as an artefact. `workflow_dispatch` accepts a brief path, iteration count and
 provider; add `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` as a repository secret to run
 against a real model.
+
+---
+
+## ProjectForge — Phases 1–5
+
+Phase 1 established shared Pydantic contracts, PostgreSQL persistence, Alembic
+migrations, and the FastAPI CRUD surface. Phase 2 added a durable Postgres-backed FSM,
+RQ/Redis dispatch, event/audit records, persisted budgets, task retries/timeouts,
+resource-aware DAG scheduling, and the two mandatory human approval gates. Phase 3
+replaces only the Requirement and Planner stubs with LangGraph-wrapped model calls
+routed through optional LiteLLM: each agent uses a single linear model-call subgraph,
+with strict schema validation in deterministic Python and no LLM-controlled branching.
+Requirement returns a validated `ProjectSpec` or pauses for explicit clarification,
+and Planner emits a validated, acyclic `TaskGraph` that is persisted before the
+plan-approval gate. Phase 4 established bounded Docker execution. Phase 5 replaces
+Coder, Tester, and Debugger stubs in `BUILD_LOOP`: task-scoped code changes and generated
+tests are committed to a per-project Git repository, tests run in the isolated Python
+or Node sandbox, and bounded Debugger guidance is fed into each Coder retry. Normalized
+ProjectSpec facts are chunked and retrieved from PostgreSQL pgvector, so Coder receives
+only the top relevant excerpts rather than the entire specification. Orchestration and
+control flow remain deterministic code; no LLM chooses state transitions. Integration,
+review, and packaging remain stubs. The workflow engine is
+exposed through a swappable `WorkflowEngine` interface. Production tables are not
+created on API startup; apply the Alembic migrations explicitly. The API defaults to
+loopback because authentication is not configured and must not be exposed publicly
+without an authenticated deployment.
+
+### Install and start PostgreSQL locally
+
+```bash
+python -m pip install -e '.[dev,ui,projectforge-api,projectforge-worker,projectforge-agents,projectforge-sandbox]'
+export POSTGRES_PASSWORD='choose-a-local-password'
+docker compose -f infra/docker-compose.yml up -d postgres redis
+export PROJECTFORGE_DATABASE_URL="postgresql+psycopg://projectforge:${POSTGRES_PASSWORD}@127.0.0.1:5432/projectforge"
+export PROJECTFORGE_REDIS_URL="redis://127.0.0.1:6379/0"
+alembic -c infra/alembic.ini upgrade head
+projectforge-api
+# In another terminal, with the same environment:
+projectforge-worker
+```
+
+### Model-backed agent configuration
+
+The API and RQ worker use the same environment-driven `ModelConfig`; the shared tier
+is `strong` by default, and Requirement, Planner, Coder, Tester, and Debugger use it
+unless an agent-specific model override is set. Dahl is the initial provider. Its
+model catalog rotates, so fetch a current exact model ID from the `/v1/models` endpoint
+rather than relying on a hard-coded example:
+
+```bash
+export PROJECTFORGE_LLM_PROVIDER=dahl
+export PROJECTFORGE_LLM_TIER=strong
+export PROJECTFORGE_DAHL_STRONG_MODEL='<current model id>'
+export DAHL_API_KEY='<Dahl API key>'
+# Optional: defaults to https://inference.dahl.global/v1
+export PROJECTFORGE_LLM_BASE_URL='https://inference.dahl.global/v1'
+```
+
+`PROJECTFORGE_LLM_MODEL` can set the shared exact model ID directly. These optional
+variables override it per agent: `PROJECTFORGE_REQUIREMENT_MODEL`,
+`PROJECTFORGE_PLANNER_MODEL`, `PROJECTFORGE_CODER_MODEL`, `PROJECTFORGE_TESTER_MODEL`,
+and `PROJECTFORGE_DEBUGGER_MODEL`. `PROJECTFORGE_LLM_ROUTE_PREFIX` defaults to
+LiteLLM's `openai` adapter for Dahl's OpenAI-compatible endpoint. Model responses are
+locally validated against strict Pydantic contracts; structured provider output is not
+assumed.
+
+Before each model call, ProjectForge atomically reserves budget in PostgreSQL. The
+per-call token ceiling defaults to `PROJECTFORGE_LLM_RESERVATION_TOKENS=60000`; each
+hold is sized from a conservative, network-free UTF-8 prompt-byte upper bound plus
+maximum output, capped at that ceiling. The per-call spend ceiling defaults to
+`PROJECTFORGE_LLM_RESERVATION_SPEND=0.50` USD with a 900-second reservation TTL;
+`PROJECTFORGE_LLM_MAX_OUTPUT_TOKENS=4096` and
+`PROJECTFORGE_LLM_TIMEOUT_SECONDS=60` bound each request. Tune the spend ceiling to at
+least the provider's maximum possible charge for the configured model and token limit,
+while keeping it within each project's spend cap. When provider usage or cost is
+missing, the audit ledger conservatively settles the full per-call hold. A response
+exceeding the hold is still recorded and immediately escalates the workflow.
+`PROJECTFORGE_REQUIREMENT_CONFIDENCE=0.70` is the default threshold below which
+Requirement must ask the user rather than persist a guessed specification.
+
+Override `PROJECTFORGE_HOST` only in a protected deployment. Do not expose this
+unauthenticated API or its human-approval routes to a public network. Database and
+Redis connection settings are read from environment variables, not source control.
+
+### Phase 4 — isolated code execution
+
+Install the optional Docker SDK and build the preconfigured runner/proxy images from
+the repository root:
+
+```bash
+python -m pip install -e '.[projectforge-sandbox]'
+docker build -f infra/sandbox/python/Dockerfile -t projectforge/python-test:3.11 .
+docker build -f infra/sandbox/node/Dockerfile -t projectforge/node-test:20 .
+docker build -f infra/sandbox/egress-proxy/Dockerfile -t projectforge/sandbox-egress-proxy:3.11 .
+```
+
+`projectforge_sandbox.SandboxManager.run()` accepts a Python or Node runtime, a shell
+string or argument vector, and either a relative-path-to-content mapping or a project
+worktree. It copies the input through Docker's archive API (never a host bind mount),
+returns separate stdout/stderr, exit code, timeout status, duration, and container ID,
+and always removes the temporary container in `finally`. `reap_orphans()` is available
+for worker-startup cleanup after a process crash and only removes labeled resources
+older than the maximum lease plus a five-minute safety margin. `project_dir` excludes VCS data,
+virtual environments, caches, common secret files/directories, and rejects symlinks;
+curated `project_files` mappings are the preferred input when the worktree may contain
+credentials.
+
+The defaults are one CPU core, 512 MiB memory with swap disabled, 60 seconds, 128
+processes, a 100 MiB input-workspace ceiling, and bounded output. Per-run limits can be
+lowered or raised only within hard caps (4 CPU cores, 4 GiB, and one hour). Containers
+run as an unprivileged UID with a read-only root filesystem, ephemeral workspace/tmp
+mounts, dropped Linux capabilities, `no-new-privileges`, and no Docker socket or host
+mounts. Python images include pytest 8.3.5; Node images include Jest 29.7.0. Pin image
+digests in production deployments rather than relying on mutable tags. The images
+contain only the test runners; project dependencies must be baked into an approved
+image or staged with the project (network access is not needed for ordinary runs). Run
+the manager only on a dedicated worker host or isolated/rootless Docker daemon: access
+to the manager's Docker socket is privileged, and that socket is never mounted into a
+sandbox.
+
+Network access is `none` by default. For an explicit `network_allowlist`, the sandbox
+is attached only to an internal Docker network and HTTP(S) requests must pass through
+a per-run egress proxy attached to a separate outbound bridge. Exact host rules and
+`*.example.org` subdomain rules are supported; host rules allow ports 80/443, while a
+rule with an explicit port allows only that port. The proxy pins DNS results to public
+IP addresses and rejects private/reserved destinations. Non-proxy-aware clients and
+direct socket attempts remain blocked; allowlisted egress is not a general network
+bridge.
+
+Run Docker-backed acceptance tests after building the images:
+
+```bash
+python -m pytest tests/test_projectforge_sandbox.py -m docker -q
+```
+
+Those tests run passing and failing pytest files, kill an infinite loop at its deadline,
+verify default egress is blocked, and smoke-test the Node/Jest image. They skip when the
+Docker SDK/daemon or built images are absent; CI installs the optional extra, builds the
+images, and runs them. This workspace has no Docker Engine, so live container and
+network-isolation tests have not run here.
+
+### Phase 5 — task-scoped build agents
+
+The production suite now uses real Coder, Tester, and Debugger agents inside the
+Postgres-backed `BUILD_LOOP`. Coder receives one persisted `TaskNode`, bounded relevant
+repository files, Debugger feedback from the previous failed attempt (when present),
+and at most three ProjectSpec excerpts selected through pgvector cosine similarity;
+that bound guarantees the full specification is never sent to Coder.
+Spec chunks use a deterministic 384-dimensional local feature embedding, avoiding a
+second provider call and extra runtime dependency. The HNSW pgvector index and task
+runtime metadata are added by migration `0004_build_loop_context`.
+
+Set `PROJECTFORGE_REPO_ROOT` to change the default `/data/repos` workspace root. Each
+project gets its own Git repository at `{root}/{project_id}`. Coder writes are checked
+against the task's `write_set`; Tester may create tests only under `tests/`. Every
+changed file batch is applied atomically and committed with an agent/task-specific
+message. Tester creates a test suite only when no discoverable tests exist, then runs
+`pytest -q` or Jest in the Docker sandbox. The result includes pass/fail, exit code,
+timeout state, bounded stdout/stderr, tested files, and execution evidence. Debugger
+receives those logs plus relevant code, returns actionable structured repair guidance,
+and never writes files itself. The FSM permits at most three Debugger-guided retries
+per task before escalating; retries and agent calls remain persisted and auditable.
+
+Run the offline build-agent, RAG, Git, and feedback-propagation tests with:
+
+```bash
+python -m pytest tests/test_projectforge_build_agents.py -q
+```
+
+The same test module includes a Docker-gated end-to-end run of the Phase 3
+`simple_script.json` fixture through PLAN, human plan approval, and BUILD_LOOP. It
+asserts the generated tests pass in the isolated sandbox and checks the final project
+repository. That live test skips locally without Docker and is required by CI alongside
+the Phase 4 sandbox suite.
+
+### CRUD surface
+
+- `POST /api/projects` (accepts `raw_brief_text` and optional `rubric_text`, or a legacy validated `spec`), `GET /api/projects`, `GET /api/projects/{project_id}`
+- `PATCH /api/projects/{project_id}`, `DELETE /api/projects/{project_id}`
+- `POST /api/projects/{project_id}/task-graphs`
+- `GET /api/projects/{project_id}/task-graphs` and `GET .../{graph_id}`
+- `PUT /api/projects/{project_id}/task-graphs/{graph_id}`
+- `DELETE /api/projects/{project_id}/task-graphs/{graph_id}`
+- `POST /api/projects/{project_id}/workflows` (create and queue a run; a seed graph is optional)
+- `GET /api/workflows/{workflow_id}` and `GET .../events`
+- `POST /api/workflows/{workflow_id}/clarifications` (resume a Requirement-agent clarification gate)
+- `POST /api/workflows/{workflow_id}/approvals` (`plan` or `final`)
+- `POST /api/workflows/{workflow_id}/cancellation`
+- `POST /api/workflows/{workflow_id}/dispatch` (retry a persisted queue dispatch)
+- `GET /health`
+
+Task graph contracts reject duplicate IDs, missing dependencies, mismatched edges,
+and cycles. Resource declarations use relative paths; undeclared workspace access is
+exclusive, and read/write overlaps block parallel scheduling. A graph version becomes
+immutable once a workflow references it. Task nodes and workflow runs persist retries (hard-capped at 3), timeouts, cancellation
+requests, budget usage, states, and audit events. Workflow jobs pause at
+`AWAITING_CLARIFICATION`, `AWAITING_PLAN_APPROVAL`, and
+`AWAITING_FINAL_APPROVAL`. Clarification answers resume Requirement processing;
+approval is the only way to proceed past the two human gates. Completion stores an
+AI-usage disclosure derived from
+that project's persisted agent-run audit trail. API/orchestrator tests use SQLite for
+isolation; the Alembic migrations target PostgreSQL/JSONB and have not been applied to
+a live database in this environment. Phase 3 evaluations use mocked completions for
+simple-script, web-app, and data-analysis briefs; no billable Dahl request or live
+PostgreSQL/Redis workflow was run here. Dahl `max_tokens` and provider usage/cost fields
+still require a configured deployment smoke test because the inspected Dahl API docs
+do not establish those response details.
+
+### ProjectForge code map
+
+```text
+packages/schemas/                 Shared Pydantic v2 contracts
+packages/agents/requirement.py     Model-backed brief normalization and clarification
+packages/agents/planner.py         Model-backed validated DAG generation
+packages/agents/build_agents.py    Structured model-backed Coder/Tester/Debugger workers
+packages/agents/rag.py             ProjectSpec chunking and pgvector cosine retrieval
+packages/agents/git_workspace.py   Scoped per-project Git workspaces and agent commits
+packages/agents/litellm_client.py  Configured Dahl/OpenAI-compatible LiteLLM adapter
+packages/agents/langgraph_runner.py One-node linear LangGraph call; no control-flow decisions
+packages/agents/prompts/           Versioned Requirement/Planner/Coder/Tester/Debugger prompts
+packages/agents/stubs.py           Deterministic stubs for integration/review/packaging/tests
+packages/orchestrator/engine.py    Postgres FSM, build retries, clarification gates, DAG persistence
+packages/orchestrator/budget.py    Atomic provider budget reservations and settlement
+packages/orchestrator/scheduler.py Topological/resource-conflict task scheduler
+packages/orchestrator/queue.py    RQ/Redis dispatch adapter
+packages/sandbox/manager.py        Ephemeral Docker execution, limits, cleanup, and network policy
+packages/sandbox/egress_proxy.py   Allowlist-only HTTP(S) egress proxy
+infra/sandbox/                    Python/pytest, Node/Jest, and egress-proxy images
+apps/api/main.py                   FastAPI CRUD and workflow/approval endpoints
+apps/api/db.py                     Engine/session configuration
+apps/api/orm.py                    SQLAlchemy persistence mappings
+apps/api/cli.py                    Local API launcher (127.0.0.1 by default)
+infra/alembic.ini                  Alembic configuration
+infra/migrations/                  PostgreSQL migrations (Phases 1–5)
+infra/docker-compose.yml           Local Postgres/pgvector + Redis services
+tests/test_projectforge_*.py       Contract, API, persistence, scheduler, and FSM tests
+```

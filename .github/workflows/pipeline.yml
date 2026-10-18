@@ -36,9 +36,17 @@ jobs:
       - name: Install test dependencies
         # The [ui] extra pulls streamlit + pandas. Without it the AppTest tests
         # skip rather than fail, which would silently drop dashboard coverage.
-        run: python -m pip install --upgrade pip pytest && python -m pip install -e '.[ui]'
+        run: python -m pip install --upgrade pip pytest && python -m pip install -e '.[dev,ui,projectforge-api,projectforge-worker,projectforge-agents,projectforge-sandbox]'
+
+      - name: Build isolated sandbox runner images
+        run: |
+          docker build -f infra/sandbox/python/Dockerfile -t projectforge/python-test:3.11 .
+          docker build -f infra/sandbox/node/Dockerfile -t projectforge/node-test:20 .
+          docker build -f infra/sandbox/egress-proxy/Dockerfile -t projectforge/sandbox-egress-proxy:3.11 .
 
       - name: Run the test suite
+        env:
+          PROJECTFORGE_REQUIRE_DOCKER: "1"
         run: python -m pytest tests/ -q
 
       - name: Assert the dashboard tests actually ran

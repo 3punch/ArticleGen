@@ -29,6 +29,43 @@ def test_invalid_brief_is_routed_back_without_running_agents(tmp_path, valid_bri
     assert "ROUTE_BACK" in log
 
 
+def test_invalid_task_id_cannot_create_a_path_outside_the_workspace(tmp_path, valid_brief):
+    valid_brief.task_id = "../escaped-task"
+    result = Orchestrator(_config(tmp_path)).run(valid_brief)
+
+    assert result.status == "ROUTE_BACK"
+    assert result.workspace == ""
+    assert not (tmp_path / "escaped-task").exists()
+    assert not (tmp_path / "runs").exists()
+
+
+def test_final_status_respects_the_configured_score_target():
+    from articlegen.models import GateResult
+
+    gate = GateResult(ok=True, stage="draft_verification")
+    assert Orchestrator._final_status(0.80, gate, [], score_target=0.70) == "PASS"
+    assert Orchestrator._final_status(0.80, gate, [], score_target=0.90) == "NEEDS_HUMAN"
+
+
+def test_run_does_not_pass_when_it_misses_a_higher_configured_target(
+    tmp_path, example_brief_dict
+):
+    brief = Brief.from_dict(example_brief_dict)
+    result = Orchestrator(_config(tmp_path, max_iterations=2, score_target=0.99)).run(brief)
+
+    assert 0.85 <= result.final_score < 0.99
+    assert result.status == "NEEDS_HUMAN"
+
+
+def test_seeded_section_prose_is_preserved_in_the_initial_draft(valid_brief):
+    valid_brief.sections[0].body = "A complete user-supplied section draft."
+
+    draft = Draft.from_brief(valid_brief)
+
+    assert draft.sections[0].body == valid_brief.sections[0].body
+    assert all(not section.body for section in draft.sections[1:])
+
+
 def test_full_loop_runs_offline_and_produces_a_draft(tmp_path, valid_brief):
     orchestrator = Orchestrator(_config(tmp_path))
     result = orchestrator.run(valid_brief)

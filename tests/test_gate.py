@@ -56,6 +56,13 @@ def test_placeholder_in_objective_routes_back(valid_brief):
     assert any(i.category == "formatting" for i in result.blockers)
 
 
+def test_placeholder_in_section_title_or_purpose_routes_back(valid_brief):
+    valid_brief.sections[1].purpose = "TODO: describe this section"
+    result = verify_brief(valid_brief)
+    assert result.routed_back is True
+    assert any("section purpose contains" in i.claim for i in result.blockers)
+
+
 def test_unbalanced_code_fence_in_seed_body_routes_back(valid_brief):
     valid_brief.sections[0].body = "Some text.\n\n```python\nprint('hi')\n"
     result = verify_brief(valid_brief)

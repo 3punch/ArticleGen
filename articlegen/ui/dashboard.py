@@ -116,10 +116,18 @@ with tab_brief:
         if uploaded is not None:
             try:
                 loaded = json.loads(uploaded.getvalue().decode("utf-8"))
-                st.session_state["loaded_brief"] = loaded
-                st.success(f"Loaded brief '{loaded.get('task_id', '?')}'.")
-            except json.JSONDecodeError as exc:
+                if not isinstance(loaded, dict):
+                    st.error("Invalid brief: the top-level JSON value must be an object.")
+                else:
+                    from articlegen.models import Brief
+
+                    Brief.from_dict(loaded)  # validate types before using them as widget defaults
+                    st.session_state["loaded_brief"] = loaded
+                    st.success(f"Loaded brief '{loaded.get('task_id', '?')}'.")
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 st.error(f"Invalid JSON: {exc}")
+            except (TypeError, ValueError) as exc:
+                st.error(f"Invalid brief structure: {exc}")
         if st.button("Use bundled example", width="stretch"):
             st.session_state["loaded_brief"] = _load_example()
             st.success("Loaded examples/brief_example.json")

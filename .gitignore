@@ -18,5 +18,13 @@ venv/
 # Pipeline run artefacts. The change log is tracked; per-run workspaces are not.
 runs/
 
+# Local ProjectForge state and secrets
+*.sqlite
+*.sqlite3
+*.db
+.env
+.env.*
+!.env.example
+
 # OS noise
 .DS_Store

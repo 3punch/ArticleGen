@@ -18,13 +18,13 @@ DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__
                               "config", "default.json")
 
 TEMPLATE_BRIEF: Dict[str, Any] = {
-    "task_id": "example-article",
-    "title": "Your Article Title Here",
+    "task_id": "my-article",
+    "title": "TODO: replace with a specific article title",
     "objective": (
-        "Explain what the reader will be able to do after reading, and why it matters to them. "
-        "This field must be at least 40 characters and should name the concrete outcome."
+        "TODO: describe the specific outcome the reader should achieve, why it matters, "
+        "and what the article will cover."
     ),
-    "audience": "engineers who maintain the system in production",
+    "audience": "TODO: name the intended readers",
     "mode": "article",
     "tone": "neutral, precise, professional",
     "target_words": 1200,
@@ -47,7 +47,10 @@ TEMPLATE_BRIEF: Dict[str, Any] = {
 
 def _load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object at the top level")
+    return value
 
 
 def _load_config(path: Optional[str]) -> Dict[str, Any]:
@@ -119,8 +122,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"score     : {result.final_score:.4f} (target {config.score_target})")
     print(f"iterations: {len(result.iterations)}")
     print(f"tokens    : {result.tokens_total} (ceiling {config.budget.run_token_ceiling})")
-    print(f"workspace : {result.workspace}")
-    print(f"draft     : {os.path.join(result.workspace, 'master_draft.md')}")
+    print(f"workspace : {result.workspace or '(not created; brief failed the input gate)'}")
+    if result.final_draft is not None:
+        print(f"draft     : {os.path.join(result.workspace, 'master_draft.md')}")
+    else:
+        print("draft     : not created (brief failed the input gate)")
     print(f"log       : {config.changelog_path}")
 
     for record in result.iterations:
@@ -321,6 +327,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     except json.JSONDecodeError as exc:
         print(f"error: malformed JSON: {exc}", file=sys.stderr)
+        return 2
+    except (TypeError, ValueError) as exc:
+        print(f"error: invalid input: {exc}", file=sys.stderr)
         return 2
 
 

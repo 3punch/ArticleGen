@@ -1,7 +1,7 @@
 import pytest
 
 from articlegen.agents import build_agents
-from articlegen.agents.synthesizer import build_draft
+from articlegen.agents.synthesizer import _apply_text_fixes, build_draft
 from articlegen.agents.writer import scaffold_body
 from articlegen.llm import OfflineClient, coerce_findings, parse_json, ResponseParseError
 from articlegen.models import AgentStatus, Draft, Section, Severity
@@ -206,6 +206,15 @@ def test_writer_skips_when_there_is_no_work(valid_brief, agents):
     assert report.tokens_in == 0 and report.tokens_out == 0
     assert any("skipped" in note for note in report.notes)
     assert not writer.should_skip(valid_brief, Draft.from_brief(valid_brief), [], [])
+
+
+def test_filler_cleanup_does_not_change_url_scheme_case():
+    body = "It is important to note that the source is useful. https://example.org/paper."
+
+    cleaned = _apply_text_fixes(body, {"remove_fillers"})
+
+    assert "https://example.org/paper" in cleaned
+    assert "Https://" not in cleaned
 
 
 def test_mechanical_polish_preserves_paragraphs_and_lines(valid_brief, agents):

@@ -1,0 +1,127 @@
+{
+  "name": "data-analysis",
+  "raw_brief_text": "For an applied statistics course, analyze a provided CSV of monthly rainfall measurements from four weather stations. Produce a reproducible Python analysis that parses station, month, and millimeter values; reports per-station observation count, mean, median, and sample standard deviation; identifies the wettest station-month; and creates one comparison chart. Validate missing and nonnumeric values, include a fixed-fixture test, and write a short methods section explaining the use of sample standard deviation and any data exclusions. Do not fetch data from the internet.",
+  "rubric_text": "1. Automated: Per-station summaries and wettest station-month match independently computed fixture values. 2. Automated: Missing and nonnumeric measurements are reported as invalid rows. 3. Human judgment: The methods section explains statistical choices and data limitations accurately.",
+  "expected_task_count": {"min": 5, "max": 8},
+  "requirement_response": {
+    "status": "completed",
+    "confidence": 0.93,
+    "project_spec": {
+      "title": "Reproducible Multi-Station Rainfall Analysis",
+      "description": "Create a reproducible Python analysis of a local CSV containing monthly rainfall measurements from four stations. Validate station, month, and millimeter values; compute the specified per-station summaries and wettest station-month; produce a comparison chart, fixture-based tests, and a methods section describing statistical choices and exclusions.",
+      "deliverables": [
+        "A Python analysis that reads a local rainfall CSV and validates required fields and numeric values.",
+        "Per-station observation count, mean, median, and sample standard deviation, plus the wettest station-month.",
+        "A comparison chart, automated fixed-fixture tests, and a methods section."
+      ],
+      "constraints": [
+        "The input is a local CSV with station, month, and millimeter columns.",
+        "Missing or nonnumeric measurement values must be reported as invalid rows.",
+        "The analysis must not fetch data from the internet.",
+        "Use sample standard deviation and document data exclusions."
+      ],
+      "tech_stack_hints": ["Python 3.11", "pandas", "matplotlib", "pytest"],
+      "rubric_items": [
+        {
+          "criterion": "Per-station summaries and wettest station-month match independently computed fixture values.",
+          "type": "automatable",
+          "check_method": "Run the analysis on a fixed CSV and compare each station statistic and the selected maximum month with independently calculated expected values."
+        },
+        {
+          "criterion": "Missing and nonnumeric measurements are reported as invalid rows.",
+          "type": "automatable",
+          "check_method": "Run fixtures containing a blank and a nonnumeric millimeter value and assert both row numbers appear in validation output."
+        },
+        {
+          "criterion": "The methods section explains statistical choices and data limitations accurately.",
+          "type": "human-judgment",
+          "check_method": "A reviewer checks the sample-standard-deviation rationale, exclusion policy, and limitations against the assignment."
+        }
+      ]
+    },
+    "questions": [],
+    "uncertainties": []
+  },
+  "planner_response": {
+    "plan_summary": "Implement local CSV validation and reproducible per-station statistics, then create the chart, regression checks, and methods documentation.",
+    "evidence": [
+      "Tasks cover all requested input validation, four per-station statistics, wettest station-month, comparison chart, offline behavior, fixtures, tests, and methods notes."
+    ],
+    "task_graph": {
+      "nodes": [
+        {
+          "id": "load-and-validate",
+          "description": "Load the local rainfall CSV and report rows missing required or numeric values.",
+          "dependencies": [],
+          "acceptance_criteria": [
+            "The parser reports the source row for blank and nonnumeric millimeter values and exits without fetching network data."
+          ],
+          "assigned_agent": "coder",
+          "read_set": [],
+          "write_set": ["analysis"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "station-statistics",
+          "description": "Calculate observation count, mean, median, and sample standard deviation per station.",
+          "dependencies": ["load-and-validate"],
+          "acceptance_criteria": [
+            "The fixed fixture reports the independently calculated count, mean, median, and ddof=1 standard deviation for every station."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["analysis"],
+          "write_set": ["analysis"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "wettest-month",
+          "description": "Identify the station and month with the largest valid rainfall measurement.",
+          "dependencies": ["load-and-validate"],
+          "acceptance_criteria": [
+            "The result identifies the fixture's expected station-month pair and its millimeter value."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["analysis"],
+          "write_set": ["analysis"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "comparison-chart",
+          "description": "Create a labeled chart comparing station-level rainfall summaries.",
+          "dependencies": ["station-statistics"],
+          "acceptance_criteria": [
+            "A chart artifact exists with all four station labels, a rainfall unit label, and a descriptive title."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["analysis"],
+          "write_set": ["outputs"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "regression-tests",
+          "description": "Add fixture tests for statistics, wettest month, and invalid-row diagnostics.",
+          "dependencies": ["station-statistics", "wettest-month"],
+          "acceptance_criteria": [
+            "Automated tests compare all station statistics and the maximum pair with fixed expected values and assert both invalid-row numbers."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["analysis"],
+          "write_set": ["tests"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "methods-and-run-guide",
+          "description": "Document reproducible invocation, sample standard deviation, and data exclusions.",
+          "dependencies": ["regression-tests", "comparison-chart"],
+          "acceptance_criteria": [
+            "The methods section defines sample standard deviation, states the invalid-row policy, and gives a command that runs offline."
+          ],
+          "assigned_agent": "coder",
+          "read_set": [],
+          "write_set": ["README.md"],
+          "timeout_seconds": 300
+        }
+      ]
+    }
+  }
+}

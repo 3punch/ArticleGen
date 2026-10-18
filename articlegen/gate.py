@@ -181,6 +181,18 @@ def _check_sections(brief: Brief, issues: List[Finding]) -> None:
                 f"section purpose is too short ({len(section.purpose or '')} chars, minimum {MIN_PURPOSE})",
                 "Describe what this section must accomplish for the reader.",
             ))
+
+        for field_name, value in (("section title", section.title),
+                                  ("section purpose", section.purpose)):
+            placeholder = PLACEHOLDER_RE.search(value)
+            if placeholder:
+                issues.append(_finding(
+                    "brief", Severity.BLOCKER, "formatting", where,
+                    f"{field_name} contains an unfinished placeholder",
+                    "Replace the placeholder with specific content before running the pipeline.",
+                    placeholder.group(0),
+                ))
+
         if section.body and PLACEHOLDER_RE.search(section.body):
             issues.append(_finding(
                 "brief", Severity.BLOCKER, "formatting", section.id or where,

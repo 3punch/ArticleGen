@@ -87,7 +87,6 @@ class Orchestrator:
 
     # -- entry point ------------------------------------------------------
     def run(self, brief: Brief) -> RunResult:
-        store = MemoryStore(self.config.workspace, brief.task_id)
         self.changelog.log_event("RUN_START", brief.task_id, {
             "title": brief.title,
             "mode": brief.mode.value,
@@ -124,13 +123,17 @@ class Orchestrator:
                              tokens_total=0)
             return RunResult(
                 task_id=brief.task_id, status="ROUTE_BACK", gate=gate,
-                workspace=store.root, stop_reason=gate.reason,
+                workspace="", stop_reason=gate.reason,
             )
 
         self.events.emit(EventType.GATE_PASS, task_id=brief.task_id,
                          message="input verification passed; entering agent loop",
                          issues=len(gate.issues))
 
+        # Only create a per-task directory after the gate has validated task_id.
+        # Otherwise an invalid id such as "../outside" could escape the workspace
+        # before the gate gets a chance to route the brief back.
+        store = MemoryStore(self.config.workspace, brief.task_id)
         draft = Draft.from_brief(brief)
         store.write_master_draft(draft)
         store.absorb_findings(gate.issues)   # gate's non-blocking issues become work items
@@ -171,7 +174,8 @@ class Orchestrator:
 
         final_score = records[-1].score if records else 0.0
         final_gate = verify_draft(draft, brief)
-        status = self._final_status(final_score, final_gate, records)
+        status = self._final_status(final_score, final_gate, records,
+                                    score_target=self.config.score_target)
 
         store.write_master_draft(draft)
         store.drop_notes()
@@ -383,9 +387,10 @@ class Orchestrator:
         ]
 
     @staticmethod
-    def _final_status(score: float, gate: GateResult, records: List[IterationRecord]) -> str:
+    def _final_status(score: float, gate: GateResult, records: List[IterationRecord],
+                      score_target: float = 0.85) -> str:
         if gate.routed_back:
             return "NEEDS_HUMAN"
         if any(r.status == AgentStatus.DEGRADED for record in records for r in record.reports):
             return "NEEDS_HUMAN"
-        return "PASS" if score >= 0.85 else "NEEDS_HUMAN"
+        return "PASS" if score >= score_target else "NEEDS_HUMAN"
