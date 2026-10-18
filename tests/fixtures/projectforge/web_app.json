@@ -1,0 +1,152 @@
+{
+  "name": "web-app",
+  "raw_brief_text": "For a human-computer interaction course, build a small responsive web application for recording and reviewing university laboratory experiments. A student can create an experiment with a title, date, research question, and notes, then list experiments newest-first and filter the list by a case-insensitive title substring. Provide server-side validation, accessible labels, an empty state, and a local setup guide. Use a Python HTTP API and a browser UI; all data may be stored locally and the app must work without external services.",
+  "rubric_text": "1. Automated: Creating, listing, sorting, and case-insensitive filtering return the expected records. 2. Automated: Missing title and invalid date are rejected with field-specific errors. 3. Human judgment: Keyboard and screen-reader interaction is understandable.",
+  "expected_task_count": {"min": 6, "max": 10},
+  "requirement_response": {
+    "status": "completed",
+    "confidence": 0.94,
+    "project_spec": {
+      "title": "Laboratory Experiment Log Web App",
+      "description": "Build a local-first responsive web application for recording and reviewing university laboratory experiments through a Python HTTP API and browser UI. Support creation, newest-first listing, case-insensitive title filtering, validation, accessible labels, an empty state, and local setup documentation.",
+      "deliverables": [
+        "A Python HTTP API for creating and listing laboratory experiment records.",
+        "A browser UI for creating records and filtering a newest-first experiment list.",
+        "Field-specific validation for required titles and valid dates.",
+        "Automated behavior tests and a local setup guide."
+      ],
+      "constraints": [
+        "Store data locally and require no external services.",
+        "Experiment records include title, date, research question, and notes.",
+        "The UI provides accessible labels and an explicit empty state."
+      ],
+      "tech_stack_hints": ["Python HTTP API", "HTML/CSS/JavaScript", "SQLite", "pytest"],
+      "rubric_items": [
+        {
+          "criterion": "Creating, listing, sorting, and case-insensitive filtering return the expected records.",
+          "type": "automatable",
+          "check_method": "API and UI tests create fixed records and assert newest-first order and case-insensitive title-filter results."
+        },
+        {
+          "criterion": "Missing title and invalid date are rejected with field-specific errors.",
+          "type": "automatable",
+          "check_method": "Submit a missing title and an invalid date independently and assert the response identifies the corresponding field."
+        },
+        {
+          "criterion": "Keyboard and screen-reader interaction is understandable.",
+          "type": "human-judgment",
+          "check_method": "A reviewer navigates the creation form, filters, and empty state with a keyboard and screen reader."
+        }
+      ]
+    },
+    "questions": [],
+    "uncertainties": []
+  },
+  "planner_response": {
+    "plan_summary": "Build the local persistence and Python API first, then the accessible browser interface, automated checks, and setup documentation.",
+    "evidence": [
+      "All requested record fields, create/list/filter/sort behavior, validation, accessibility, empty state, local-only storage, tests, and setup guide are assigned to tasks."
+    ],
+    "task_graph": {
+      "nodes": [
+        {
+          "id": "data-model",
+          "description": "Define the experiment record and initialize local persistence without external services.",
+          "dependencies": [],
+          "acceptance_criteria": [
+            "A persisted record round-trips title, ISO date, research question, and notes without losing Unicode text."
+          ],
+          "assigned_agent": "coder",
+          "read_set": [],
+          "write_set": ["server"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "api-create",
+          "description": "Implement the create endpoint and field-specific server-side validation.",
+          "dependencies": ["data-model"],
+          "acceptance_criteria": [
+            "A valid create request returns the stored experiment and a missing title returns a field-specific 4xx error.",
+            "An invalid date request returns a field-specific 4xx error without creating a record."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["server"],
+          "write_set": ["server"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "api-list-filter",
+          "description": "Implement newest-first listing and case-insensitive title-substring filtering.",
+          "dependencies": ["data-model"],
+          "acceptance_criteria": [
+            "Listing two records returns descending ISO dates and filtering matches a title regardless of query case."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["server"],
+          "write_set": ["server"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "accessible-form",
+          "description": "Build the experiment creation form with accessible labels and validation feedback.",
+          "dependencies": ["api-create"],
+          "acceptance_criteria": [
+            "Every input has a programmatically associated label and validation errors are announced beside the field."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["server"],
+          "write_set": ["web"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "experiment-list-ui",
+          "description": "Build the newest-first list, title filter, and explicit empty state.",
+          "dependencies": ["api-list-filter"],
+          "acceptance_criteria": [
+            "The UI shows newest-first records, filters titles without case sensitivity, and displays an empty-state message for zero results."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["server"],
+          "write_set": ["web"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "responsive-layout",
+          "description": "Style the record form and list for narrow and desktop browser viewports.",
+          "dependencies": ["accessible-form", "experiment-list-ui"],
+          "acceptance_criteria": [
+            "At viewport widths of 375 and 1280 pixels, the form and list remain visible without horizontal page overflow."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["web"],
+          "write_set": ["web"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "automated-tests",
+          "description": "Add API and browser behavior tests for creation, filtering, order, and validation.",
+          "dependencies": ["responsive-layout"],
+          "acceptance_criteria": [
+            "Automated tests assert create/list/filter results, newest-first ordering, and both field-specific validation failures."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["server", "web"],
+          "write_set": ["tests"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "setup-guide",
+          "description": "Document local installation, startup, and the experiment workflow.",
+          "dependencies": ["automated-tests"],
+          "acceptance_criteria": [
+            "A clean checkout can follow the README commands to start the API and UI without configuring a remote service."
+          ],
+          "assigned_agent": "coder",
+          "read_set": [],
+          "write_set": ["README.md"],
+          "timeout_seconds": 300
+        }
+      ]
+    }
+  }
+}

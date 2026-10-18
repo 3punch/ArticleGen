@@ -72,6 +72,22 @@ def test_build_brief_dict_coerces_constraints_and_ignores_bad_sections():
     )
     assert data["constraints"] == ["include a worked example", "avoid invented numbers"]
     assert data["sections"] == []
+    assert "line 1" in data["_section_parse_error"]
+
+
+def test_validate_preserves_the_bad_section_line_for_the_ui():
+    data = build_brief_dict(
+        task_id="good-brief", title="A Complete And Valid Article Title",
+        objective="Explain how the pipeline converges and what the reader should decide next.",
+        audience="engineers", target_words=600,
+        sections_text=("introduction | Intro | Frame the problem for the reader | 150\n"
+                       "broken line"),
+    )
+    brief, gate, errors = validate(data)
+
+    assert brief is not None
+    assert gate.routed_back is True
+    assert errors == ["sections: line 2: expected 4 fields separated by '|', found 1"]
 
 
 def test_validate_returns_gate_blockers_for_a_thin_brief():

@@ -87,10 +87,12 @@ def build_brief_dict(*, task_id: str, title: str, objective: str, audience: str,
         for line in (constraints_text or "").splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
+    section_parse_error = ""
     try:
         sections = parse_sections(sections_text or "")
-    except SectionParseError:
+    except SectionParseError as exc:
         sections = []
+        section_parse_error = str(exc)
 
     return {
         "task_id": (task_id or "").strip(),
@@ -103,6 +105,9 @@ def build_brief_dict(*, task_id: str, title: str, objective: str, audience: str,
         "requires_citations": bool(requires_citations),
         "constraints": constraints,
         "sections": sections,
+        # Internal diagnostic consumed by validate(); preserving it here lets the
+        # UI show the bad line instead of reducing every parse error to "no sections".
+        "_section_parse_error": section_parse_error,
     }
 
 
@@ -113,10 +118,9 @@ def validate(data: Dict[str, Any]) -> Tuple[Optional[Brief], GateResult, List[st
     when the dict could not be coerced at all; otherwise the gate decides.
     """
     parse_errors: List[str] = []
-    try:
-        parse_sections("")  # cheap sanity check that the parser is wired
-    except SectionParseError as exc:  # pragma: no cover - defensive
-        parse_errors.append(str(exc))
+    section_parse_error = data.get("_section_parse_error")
+    if section_parse_error:
+        parse_errors.append(f"sections: {section_parse_error}")
 
     try:
         brief = Brief.from_dict(data)

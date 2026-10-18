@@ -42,7 +42,12 @@ def _apply_text_fixes(body: str, fix_types: set) -> str:
         for pattern, replacement in FILLER_PATTERNS:
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         text = re.sub(r"[ ]{2,}", " ", text)
-        text = re.sub(r"([.!?]) ([a-z])", lambda m: f"{m.group(1)} {m.group(2).upper()}", text)
+        # Do not sentence-capitalize the scheme in a URL following punctuation.
+        text = re.sub(
+            r"([.!?]) (?![A-Za-z][A-Za-z0-9+.-]*://)([a-z])",
+            lambda m: f"{m.group(1)} {m.group(2).upper()}",
+            text,
+        )
         text = re.sub(r"\b,\s*([.!?])", r"\1", text)
     if "expand_contractions" in fix_types:
         for contraction, expanded in CONTRACTIONS.items():

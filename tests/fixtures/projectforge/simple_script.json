@@ -1,0 +1,98 @@
+{
+  "name": "simple-script",
+  "raw_brief_text": "For a university data-literacy course, build a Python 3.11 command-line program that reads a UTF-8 CSV of daily campus bicycle counts. It must validate the required date and count columns, compute the row count, total, mean, and maximum daily count, and write a deterministic JSON summary to a caller-selected output path. Include automated tests and a short README with invocation examples. Reject malformed rows clearly; do not require network access.",
+  "rubric_text": "1. Automated: Correct row count, sum, mean, and maximum on the supplied CSV fixture. 2. Human judgment: The README explains assumptions and malformed-input behavior clearly.",
+  "expected_task_count": {"min": 3, "max": 6},
+  "requirement_response": {
+    "status": "completed",
+    "confidence": 0.96,
+    "project_spec": {
+      "title": "Campus Bicycle Count Summary CLI",
+      "description": "Implement a Python 3.11 command-line program that validates a UTF-8 CSV of daily campus bicycle counts, computes the required summary statistics, and writes deterministic JSON. Include tests and user documentation; reject malformed rows clearly and operate without network access.",
+      "deliverables": [
+        "A Python 3.11 CLI that reads the required CSV columns and validates malformed rows.",
+        "A deterministic JSON report containing row_count, total_count, mean_count, and maximum_daily_count.",
+        "Automated tests using a fixed CSV fixture and a README with invocation examples."
+      ],
+      "constraints": [
+        "Input is UTF-8 CSV with date and count columns.",
+        "The program must not require network access.",
+        "Malformed input must produce a clear error."
+      ],
+      "tech_stack_hints": ["Python 3.11", "argparse", "csv", "json", "pytest"],
+      "rubric_items": [
+        {
+          "criterion": "Correct row count, sum, mean, and maximum on the supplied CSV fixture.",
+          "type": "automatable",
+          "check_method": "Run the CLI against the fixed fixture and compare the four JSON values with independently calculated expected values."
+        },
+        {
+          "criterion": "The README explains assumptions and malformed-input behavior clearly.",
+          "type": "human-judgment",
+          "check_method": "A reviewer assesses whether the invocation examples and input/error explanations are understandable and complete."
+        }
+      ]
+    },
+    "questions": [],
+    "uncertainties": []
+  },
+  "planner_response": {
+    "plan_summary": "Build the CSV validation, statistic calculation, deterministic JSON output, and reproducible tests/documentation as four bounded tasks.",
+    "evidence": [
+      "The plan explicitly covers CSV validation, all four requested metrics, JSON output, automated tests, and README examples."
+    ],
+    "task_graph": {
+      "nodes": [
+        {
+          "id": "validate-csv",
+          "description": "Implement CLI argument parsing and validation of CSV headers, dates, and count values.",
+          "dependencies": [],
+          "acceptance_criteria": [
+            "A CSV missing the date or count header exits with code 2 and names the missing header.",
+            "A malformed date or negative count produces a nonzero exit and identifies the invalid row."
+          ],
+          "assigned_agent": "coder",
+          "read_set": [],
+          "write_set": ["src"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "calculate-metrics",
+          "description": "Compute row count, total, arithmetic mean, and maximum daily count from validated rows.",
+          "dependencies": ["validate-csv"],
+          "acceptance_criteria": [
+            "The fixed fixture returns row_count 3, total_count 24, mean_count 8, and maximum_daily_count 12."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["src"],
+          "write_set": ["src"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "write-json-report",
+          "description": "Write the summary as stable JSON at the output path selected by the CLI.",
+          "dependencies": ["calculate-metrics"],
+          "acceptance_criteria": [
+            "The selected output file is valid UTF-8 JSON with exactly the four required metric keys."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["src"],
+          "write_set": ["src"],
+          "timeout_seconds": 300
+        },
+        {
+          "id": "tests-and-readme",
+          "description": "Add automated fixture and malformed-input tests and document the CLI invocation.",
+          "dependencies": ["write-json-report"],
+          "acceptance_criteria": [
+            "The test suite verifies fixture metrics, malformed-row errors, and the documented CLI command."
+          ],
+          "assigned_agent": "coder",
+          "read_set": ["src"],
+          "write_set": ["tests", "README.md"],
+          "timeout_seconds": 300
+        }
+      ]
+    }
+  }
+}

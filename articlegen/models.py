@@ -14,6 +14,27 @@ from typing import Any, Dict, List, Optional
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,48}$")
 
 
+def _text_value(value: Any, field_name: str, default: str = "") -> str:
+    """Read a text field without turning JSON objects/lists into misleading prose."""
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value.strip()
+
+
+def _integer_value(value: Any, field_name: str, default: int = 0) -> int:
+    """Read an integer field without silently truncating floats or accepting booleans."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{field_name} must be an integer")
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"{field_name} must be an integer") from None
+
+
 class Severity(str, Enum):
     """Ordered finding severity. `rank` drives both scoring and gate routing."""
 
@@ -107,18 +128,79 @@ class Brief:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Brief":
+        """Parse a JSON brief and reject malformed shapes with field-level errors.
+
+        This is a schema boundary: a string such as ``"false"`` must not silently
+        become ``True`` for ``requires_citations``, and a string in ``sections``
+        must not be iterated character by character before the gate can run.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("brief must be a JSON object")
+
+        raw_sections = data.get("sections")
+        if raw_sections is None:
+            raw_sections = []
+        if not isinstance(raw_sections, list):
+            raise ValueError("sections must be an array of objects")
+
+        sections: List[Section] = []
+        for index, raw_section in enumerate(raw_sections):
+            prefix = f"sections[{index}]"
+            if not isinstance(raw_section, dict):
+                raise ValueError(f"{prefix} must be an object")
+            sections.append(Section(
+                id=_text_value(raw_section.get("id", ""), f"{prefix}.id"),
+                title=_text_value(raw_section.get("title", ""), f"{prefix}.title"),
+                purpose=_text_value(raw_section.get("purpose", ""), f"{prefix}.purpose"),
+                body=_text_value(raw_section.get("body", ""), f"{prefix}.body"),
+                word_target=_integer_value(raw_section.get("word_target", 0),
+                                           f"{prefix}.word_target"),
+            ))
+
+        raw_constraints = data.get("constraints")
+        if raw_constraints is None:
+            raw_constraints = []
+        if not isinstance(raw_constraints, list):
+            raise ValueError("constraints must be an array of strings")
+        constraints = [
+            _text_value(item, f"constraints[{index}]")
+            for index, item in enumerate(raw_constraints)
+        ]
+
+        raw_mode = data.get("mode", "article")
+        if raw_mode is None or raw_mode == "":
+            raw_mode = "article"
+        if isinstance(raw_mode, Mode):
+            mode = raw_mode
+        elif isinstance(raw_mode, str):
+            try:
+                mode = Mode(raw_mode.strip().lower())
+            except ValueError:
+                raise ValueError("mode must be either 'article' or 'code'") from None
+        else:
+            raise ValueError("mode must be either 'article' or 'code'")
+
+        requires_citations = data.get("requires_citations", False)
+        if requires_citations is None:
+            requires_citations = False
+        if not isinstance(requires_citations, bool):
+            raise ValueError("requires_citations must be a boolean")
+
+        tone = _text_value(data.get("tone", ""), "tone") or "neutral, precise, professional"
+        language = _text_value(data.get("language", "en"), "language") or "en"
+
         return cls(
-            task_id=str(data.get("task_id", "")).strip(),
-            title=str(data.get("title", "")).strip(),
-            objective=str(data.get("objective", "")).strip(),
-            audience=str(data.get("audience", "")).strip(),
-            mode=Mode.parse(data.get("mode", "article")),
-            tone=str(data.get("tone", "")).strip() or "neutral, precise, professional",
-            target_words=int(data.get("target_words", 0) or 0),
-            sections=[Section.from_dict(s) for s in (data.get("sections") or [])],
-            constraints=[str(c) for c in (data.get("constraints") or [])],
-            requires_citations=bool(data.get("requires_citations", False)),
-            language=str(data.get("language", "en")).strip() or "en",
+            task_id=_text_value(data.get("task_id", ""), "task_id"),
+            title=_text_value(data.get("title", ""), "title"),
+            objective=_text_value(data.get("objective", ""), "objective"),
+            audience=_text_value(data.get("audience", ""), "audience"),
+            mode=mode,
+            tone=tone,
+            target_words=_integer_value(data.get("target_words", 0), "target_words"),
+            sections=sections,
+            constraints=constraints,
+            requires_citations=requires_citations,
+            language=language,
         )
 
     @property
@@ -262,14 +344,19 @@ class Draft:
 
     @classmethod
     def from_brief(cls, brief: Brief) -> "Draft":
-        """Seed draft: outline only, no prose. The Writer fills iteration 1."""
+        """Seed the draft with the outline and preserve any supplied section prose.
+
+        Empty or underfilled sections are left for the Writer; full seed sections
+        are reviewed as-is rather than being silently discarded.
+        """
         return cls(
             task_id=brief.task_id,
             version=0,
             title=brief.title,
             engine="seed",
             sections=[
-                Section(id=s.id, title=s.title, purpose=s.purpose, body="", word_target=s.word_target)
+                Section(id=s.id, title=s.title, purpose=s.purpose, body=s.body,
+                        word_target=s.word_target)
                 for s in brief.sections
             ],
         )
