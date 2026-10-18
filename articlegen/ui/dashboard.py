@@ -82,8 +82,11 @@ with st.sidebar:
     iterations = st.slider("Max iterations", 1, 8, 4)
     score_target = st.slider("Target score", 0.50, 0.99, 0.85, 0.01)
     cap = st.number_input("Context hard cap (tokens)", 500, 20000, 6000, 100)
-    provider = st.selectbox("Provider", ["auto", "anthropic", "openai", "offline"],
-                            help="With no API key set, agents use deterministic engines.")
+    provider = st.selectbox(
+        "Provider", ["auto", "anthropic", "openai", "dahl", "offline"],
+        help=("Real calls need ANTHROPIC_API_KEY, OPENAI_API_KEY or DAHL_API_KEY. "
+              "With no API key set, agents use deterministic engines."),
+    )
     st.session_state.score_target = score_target
 
     st.subheader("Paths")

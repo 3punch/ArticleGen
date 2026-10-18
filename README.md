@@ -280,7 +280,20 @@ tests/                 # gate, agents, memory, loop, CLI and dashboard coverage
 | ---- | ------- | --------- |
 | `anthropic` | `ANTHROPIC_API_KEY` set (or `--provider anthropic`) | real model calls via `urllib` |
 | `openai` | `OPENAI_API_KEY` set (or `--provider openai`) | real model calls via `urllib` |
+| `dahl` | `DAHL_API_KEY` set (or `--provider dahl`) | real model calls via `urllib` against the Dahl inference API |
 | `offline-heuristic` | no key (default) | deterministic rule-based engines |
+
+The `dahl` provider speaks the OpenAI-compatible chat-completions protocol at
+`https://inference.dahl.global/v1/chat/completions` (Bearer auth). Defaults and
+overrides:
+
+```bash
+export DAHL_API_KEY='<Dahl API key>'          # required
+export DAHL_MODEL='zai-org/GLM-5.3-Flash'     # optional; this is the default model
+export DAHL_BASE_URL='https://inference.dahl.global/v1'   # optional; the default
+# or per run:
+articlegen run brief.json --provider dahl --model zai-org/GLM-5.3-Flash
+```
 
 The offline engine is **not** a model. It runs genuine checks — Python blocks are
 actually compiled, anchors are actually resolved, metric contradictions are actually
@@ -293,8 +306,8 @@ testable and runnable without credentials. Every report and change-log line name
 the engine that produced it.
 
 **Verification status:** the offline path is covered by the test suite and a full
-end-to-end run. The two network clients are implemented but were not exercised against
-the live APIs.
+end-to-end run. The three network clients are implemented but were not exercised
+against the live APIs.
 
 ---
 
@@ -304,8 +317,8 @@ the live APIs.
 tests, typechecks and builds the Next.js workspace, verifies the valid/invalid example
 briefs and prompt templates, then executes the orchestrated loop and uploads `runs/` as
 an artefact. `workflow_dispatch` accepts a brief path, iteration count and provider;
-add `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` as a repository secret to run against a
-real model.
+add `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `DAHL_API_KEY` as a repository secret to
+run against a real model.
 
 ---
 

@@ -15,7 +15,7 @@ on:
         required: false
         default: "4"
       provider:
-        description: "LLM provider (auto|anthropic|openai|offline)"
+        description: "LLM provider (auto|anthropic|openai|dahl|offline)"
         required: false
         default: "auto"
 
@@ -160,6 +160,7 @@ jobs:
           # Free-tier default: no key -> deterministic engine. Set a secret to use a model.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DAHL_API_KEY: ${{ secrets.DAHL_API_KEY }}
         run: |
           BRIEF="${{ github.event.inputs.brief || 'examples/brief_example.json' }}"
           ITERATIONS="${{ github.event.inputs.iterations || '4' }}"
