@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -11,6 +14,7 @@ import zipfile
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from projectforge_agents.config import ModelConfig
 from projectforge_agents.git_workspace import GitWorkspaceManager
@@ -18,7 +22,7 @@ from projectforge_agents.litellm_client import ModelCompletion
 from projectforge_agents.suite import ProjectForgeAgentSuite
 from projectforge_api.db import build_engine, make_session_factory
 from projectforge_api.main import create_app
-from projectforge_api.orm import Base
+from projectforge_api.orm import AgentRunRow, Base
 from projectforge_orchestrator.engine import PostgresFSMEngine
 from projectforge_sandbox import SandboxManager, SandboxResult
 from projectforge_schemas.models import WorkflowState
@@ -504,11 +508,222 @@ DATA_CHART = '''<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420"
 </svg>
 '''
 
+ERDOS_SOURCE = '''from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+
+def validate_simple_graph(adjacency: Mapping[str, Sequence[str]]) -> dict[str, tuple[str, ...]]:
+    """Validate and normalize a finite undirected simple graph."""
+    if not isinstance(adjacency, Mapping):
+        raise ValueError("adjacency must be a mapping")
+    vertices = set(adjacency)
+    normalized: dict[str, tuple[str, ...]] = {}
+    for vertex, raw_neighbors in adjacency.items():
+        if not isinstance(vertex, str) or not vertex:
+            raise ValueError("vertex labels must be non-empty strings")
+        if isinstance(raw_neighbors, (str, bytes)):
+            raise ValueError("neighbors must be a sequence of vertex labels")
+        neighbors = tuple(raw_neighbors)
+        if len(neighbors) != len(set(neighbors)):
+            raise ValueError(f"duplicate neighbor in adjacency for {vertex}")
+        if vertex in neighbors:
+            raise ValueError(f"self-loop at {vertex} is not allowed in a simple graph")
+        unknown = set(neighbors) - vertices
+        if unknown:
+            raise ValueError("unknown neighbor(s): " + ", ".join(sorted(unknown)))
+        normalized[vertex] = tuple(sorted(neighbors))
+    for vertex, neighbors in normalized.items():
+        for neighbor in neighbors:
+            if vertex not in normalized[neighbor]:
+                raise ValueError(f"adjacency must be symmetric for edge {vertex}-{neighbor}")
+    return dict(sorted(normalized.items()))
+
+
+def vertex_count(adjacency: Mapping[str, Sequence[str]]) -> int:
+    return len(validate_simple_graph(adjacency))
+
+
+def edge_count(adjacency: Mapping[str, Sequence[str]]) -> int:
+    graph = validate_simple_graph(adjacency)
+    return sum(map(len, graph.values())) // 2
+
+
+def minimum_degree(adjacency: Mapping[str, Sequence[str]]) -> int:
+    graph = validate_simple_graph(adjacency)
+    return min((len(neighbors) for neighbors in graph.values()), default=0)
+
+
+def is_power_of_two(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
+
+
+def _canonical_cycle(cycle: Sequence[str]) -> tuple[str, ...]:
+    path = tuple(cycle)
+    orientations = (path, tuple(reversed(path)))
+    return min(
+        orientation[index:] + orientation[:index]
+        for orientation in orientations
+        for index in range(len(path))
+    )
+
+
+def enumerate_simple_cycles(adjacency: Mapping[str, Sequence[str]]) -> list[tuple[str, ...]]:
+    """Enumerate each undirected simple cycle once; worst-case search is factorial."""
+    graph = validate_simple_graph(adjacency)
+    vertices = sorted(graph)
+    rank = {vertex: index for index, vertex in enumerate(vertices)}
+    found: set[tuple[str, ...]] = set()
+
+    def visit(start: str, current: str, path: list[str]) -> None:
+        for neighbor in graph[current]:
+            if neighbor == start and len(path) >= 3:
+                found.add(_canonical_cycle(path))
+            elif neighbor not in path and rank[neighbor] >= rank[start]:
+                visit(start, neighbor, [*path, neighbor])
+
+    for start in vertices:
+        visit(start, start, [start])
+    return sorted(found, key=lambda cycle: (len(cycle), cycle))
+
+
+def power_of_two_cycle_lengths(adjacency: Mapping[str, Sequence[str]]) -> list[int]:
+    return sorted({
+        len(cycle) for cycle in enumerate_simple_cycles(adjacency)
+        if is_power_of_two(len(cycle))
+    })
+
+
+def petersen_graph() -> dict[str, list[str]]:
+    """Return the Petersen graph as a 3-regular adjacency-list fixture."""
+    return {
+        "0": ["1", "4", "5"], "1": ["0", "2", "6"],
+        "2": ["1", "3", "7"], "3": ["2", "4", "8"],
+        "4": ["0", "3", "9"], "5": ["0", "7", "8"],
+        "6": ["1", "8", "9"], "7": ["2", "5", "9"],
+        "8": ["3", "5", "6"], "9": ["4", "6", "7"],
+    }
+
+
+def summarize_graph(adjacency: Mapping[str, Sequence[str]]) -> dict[str, Any]:
+    graph = validate_simple_graph(adjacency)
+    cycles = enumerate_simple_cycles(graph)
+    return {
+        "vertex_count": len(graph),
+        "edge_count": sum(map(len, graph.values())) // 2,
+        "minimum_degree": min((len(neighbors) for neighbors in graph.values()), default=0),
+        "cycle_count": len(cycles),
+        "cycle_lengths": sorted({len(cycle) for cycle in cycles}),
+        "power_of_two_cycle_lengths": sorted({
+            len(cycle) for cycle in cycles if is_power_of_two(len(cycle))
+        }),
+    }
+
+
+def write_petersen_result(output_path: str | Path) -> Path:
+    """Write a reproducible JSON result from the enumerated Petersen graph."""
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result = {"graph": "Petersen graph", **summarize_graph(petersen_graph())}
+    destination.write_text(json.dumps(result, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+    return destination
+'''
+
+ERDOS_TESTS = '''import json
+
+import pytest
+
+from graphs.cycles import (
+    enumerate_simple_cycles,
+    is_power_of_two,
+    petersen_graph,
+    summarize_graph,
+    validate_simple_graph,
+    write_petersen_result,
+)
+
+
+def test_petersen_graph_is_cubic_and_has_an_eight_cycle():
+    result = summarize_graph(petersen_graph())
+    assert result["vertex_count"] == 10
+    assert result["edge_count"] == 15
+    assert result["minimum_degree"] == 3
+    assert result["cycle_lengths"] == [5, 6, 8, 9]
+    assert result["power_of_two_cycle_lengths"] == [8]
+    cycles = enumerate_simple_cycles(petersen_graph())
+    canonical_cycles = {
+        min(
+            tuple(orientation[index:] + orientation[:index])
+            for orientation in (cycle, tuple(reversed(cycle)))
+            for index in range(len(cycle))
+        )
+        for cycle in cycles
+    }
+    assert set(cycles) == canonical_cycles
+    assert len(cycles) == len(canonical_cycles) == 57
+
+
+def test_petersen_result_artifact_is_written_from_the_computed_graph(tmp_path):
+    from graphs.cycles import write_petersen_result
+
+    artifact = write_petersen_result(tmp_path / "results" / "petersen_cycle_summary.json")
+    result = json.loads(artifact.read_text(encoding="utf-8"))
+    assert result == {
+        "graph": "Petersen graph",
+        "vertex_count": 10,
+        "edge_count": 15,
+        "minimum_degree": 3,
+        "cycle_count": 57,
+        "cycle_lengths": [5, 6, 8, 9],
+        "power_of_two_cycle_lengths": [8],
+    }
+
+
+def test_invalid_undirected_simple_graphs_are_rejected():
+    with pytest.raises(ValueError, match="symmetric"):
+        validate_simple_graph({"a": ["b"], "b": []})
+    with pytest.raises(ValueError, match="self-loop"):
+        validate_simple_graph({"a": ["a"]})
+    with pytest.raises(ValueError, match="unknown"):
+        validate_simple_graph({"a": ["missing"]})
+    with pytest.raises(ValueError, match="duplicate neighbor"):
+        validate_simple_graph({"a": ["b", "b"], "b": ["a"]})
+
+
+def test_power_of_two_check_rejects_zero_and_non_powers():
+    assert is_power_of_two(8)
+    assert not is_power_of_two(0)
+    assert not is_power_of_two(6)
+'''
+
+ERDOS_RESULT = '''{
+  "cycle_count": 57,
+  "cycle_lengths": [5, 6, 8, 9],
+  "edge_count": 15,
+  "graph": "Petersen graph",
+  "minimum_degree": 3,
+  "power_of_two_cycle_lengths": [8],
+  "vertex_count": 10
+}
+'''
+
 
 class Phase6FixtureClient:
-    def __init__(self, fixture: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        fixture: dict[str, Any],
+        *,
+        fail_packager: bool = False,
+        invalid_first_packager: bool = False,
+    ) -> None:
         self.fixture = fixture
+        self.fail_packager = fail_packager
+        self.invalid_first_packager = invalid_first_packager
         self.calls: list[str] = []
+        self.packager_inputs: list[dict[str, Any]] = []
         self.coder_calls: dict[str, int] = {}
         self.generated_files = self._files_for(fixture["name"])
         self.tester_output = self._tests_for(fixture["name"])
@@ -561,7 +776,17 @@ class Phase6FixtureClient:
                 } for item in payload["human_judgment_criteria"]],
             }
         elif agent_name == "packager":
-            output = self._package_documents(self.fixture["name"])
+            packager_input = json.loads(user_prompt)
+            self.packager_inputs.append(packager_input)
+            if self.fail_packager:
+                raise RuntimeError("simulated packager provider outage")
+            output = self._package_documents(self.fixture["name"], packager_input)
+            if self.invalid_first_packager and len(self.packager_inputs) == 1:
+                output["report_markdown"] = (
+                    "# Project Report\n\n"
+                    "## The core concept\n\n"
+                    "The project follows a clear process and delivers useful results for its audience.\n"
+                )
         else:
             raise AssertionError(f"unexpected model-backed role: {agent_name}")
         return ModelCompletion(
@@ -592,6 +817,28 @@ class Phase6FixtureClient:
                     {"path": "web/styles.css", "content": WEB_CSS},
                 ],
             }
+        if name == "erdos-gyarfas":
+            return {
+                "validate-graph": [
+                    {"path": "graphs/__init__.py", "content": ""},
+                    {"path": "graphs/cycles.py", "content": ERDOS_SOURCE},
+                ],
+                "analyze-petersen": [
+                    {"path": "results/petersen_cycle_summary.json", "content": ERDOS_RESULT},
+                ],
+                "cycle-regressions": [
+                    {"path": "tests/test_erdos_gyarfas.py", "content": ERDOS_TESTS},
+                ],
+                "readme-and-limitations": [
+                    {"path": "README.md", "content": (
+                        "# Erdős–Gyárfás Cycles in Cubic Graphs\n\n"
+                        "Run the local graph tests with `python -m pytest -q`. "
+                        "`graphs/cycles.py` contains the cycle enumerator. The search is "
+                        "factorial in the worst case; the Petersen result is one finite "
+                        "example, not a proof of the conjecture.\n"
+                    )},
+                ],
+            }
         return {
             "load-and-validate": [
                 {"path": "analysis/__init__.py", "content": ""},
@@ -615,37 +862,70 @@ class Phase6FixtureClient:
                 "test_files": [{"path": "tests/test_experiments.py", "content": WEB_TESTS}],
                 "evidence": ["Create/list/filter ordering and missing title/invalid date cases are asserted."],
             }
+        if name == "erdos-gyarfas":
+            return {
+                "summary": "Test simple-cycle canonicalization, invalid graph rejection, and Petersen graph cycle lengths.",
+                "test_files": [{"path": "tests/test_erdos_gyarfas.py", "content": ERDOS_TESTS}],
+                "evidence": ["Petersen assertions check 10 vertices, 15 edges, minimum degree 3, cycle lengths 5/6/8/9, and power-of-two length 8."],
+            }
         return {
             "summary": "Test station summaries, wettest station-month, and invalid measurement rows.",
             "test_files": [{"path": "tests/test_rainfall.py", "content": DATA_TESTS}],
             "evidence": ["Fixed station fixture values, sample deviation, maximum pair, blank and nonnumeric rows are asserted."],
         }
 
-    def _package_documents(self, name: str) -> dict[str, Any]:
+    def _package_documents(self, name: str, prompt_payload: dict[str, Any]) -> dict[str, Any]:
+        test_result = "1 passed"
+        for run in prompt_payload.get("sandbox_test_results", []):
+            match = re.search(r"\b\d+\s+(?:passed|failed|skipped)\b", str(run.get("stdout", "")), re.I)
+            if match:
+                test_result = match.group(0)
+                break
         if name == "simple-script":
             title = "Campus Bicycle Count Summary CLI"
             command = "python -m src.bicycle_summary counts.csv --output reports/summary.json"
-            notes = "The CSV uses ISO dates and nonnegative integer counts; malformed rows are reported with row numbers."
+            readme_notes = "The CSV uses ISO dates and nonnegative integer counts; malformed rows are reported with row numbers."
+            report = (
+                "## Input and implementation\n\n`src/bicycle_summary.py` provides the Python 3.11 CLI program and `summarize_csv`. It reads UTF-8 CSV files and writes deterministic JSON output. It validates required CSV columns, ISO dates, and nonnegative counts; malformed rows are rejected with row numbers and errors reported clearly. The README documents local input and output paths.\n\n"
+                "## Behavior and verification\n\nThe summary calculates row count, total, mean, and maximum daily count as deterministic output from the supplied input, not hard-coded values. The program runs offline without network access. `tests/test_bicycle_summary.py` recorded " + test_result
+                + " in the supplied sandbox output (exit code 0); no coverage or performance measurement is claimed.\n"
+            )
         elif name == "web-app":
             title = "Laboratory Experiment Log Web App"
             command = "python -m server.app"
-            notes = "The local API and accessible browser UI require no external service."
+            readme_notes = "The local API and accessible browser UI require no external service."
+            report = (
+                "## API and browser implementation\n\n`server/app.py` implements `ExperimentStore` in the Python HTTP API for creating and listing local records; it returns records newest-first and supports case-insensitive title filtering. Server-side validation produces field-specific errors for missing titles and invalid dates. `web/index.html`, `web/app.js`, and `web/styles.css` provide the accessible browser interface, associated labels, and empty state. `README.md` is the local setup guide.\n\n"
+                "## Verification\n\n`tests/test_experiments.py` recorded " + test_result
+                + " in the supplied sandbox output (exit code 0). No remote service or coverage result is claimed.\n"
+            )
+        elif name == "erdos-gyarfas":
+            title = "Erdős–Gyárfás Cycles in Cubic Graphs"
+            command = "python -m pytest -q"
+            readme_notes = "`graphs/cycles.py` validates undirected simple graphs and enumerates canonical simple cycles."
+            report = (
+                "## Implementation and graph model\n\n`graphs/cycles.py` validates finite undirected simple graphs and implements `validate_simple_graph`, `enumerate_simple_cycles`, and `power_of_two_cycle_lengths`; rotations and reverse traversals are canonicalized. The Petersen graph is cubic with 10 vertices, 15 edges, and minimum degree 3.\n\n"
+                "## Petersen graph result\n\n`results/petersen_cycle_summary.json` records 57 simple cycles with distinct lengths 5, 6, 8, and 9. The recorded power-of-two cycle length is 8. `tests/test_erdos_gyarfas.py` checks these values and graph validation; the supplied sandbox output records " + test_result + " (exit code 0).\n\n"
+                "## Scope and complexity\n\nThis finite computation on the Petersen graph is an example with minimum degree 3, not a proof of the Erdős–Gyárfás conjecture for all graphs. The depth-first search enumerates simple paths, a factorial worst-case search; canonicalizing rotations and reversals adds quadratic work per discovered cycle, and storing results requires output-sized space. No general theorem or coverage result is claimed.\n"
+            )
         else:
             title = "Reproducible Multi-Station Rainfall Analysis"
             command = "python -m analysis.rainfall rainfall.csv --output outputs/rainfall_summary.json"
-            notes = "The report uses sample standard deviation and records missing or nonnumeric measurements as invalid rows."
+            readme_notes = "The report uses sample standard deviation and records missing or nonnumeric measurements as invalid rows."
+            report = (
+                "## CSV analysis and comparison\n\nThe Python module `analysis/rainfall.py` uses `load_measurements` to validate the required station, month, and millimeters columns in each CSV, and `analyze` computes per-station summaries plus the wettest station-month. `outputs/rainfall_comparison.svg` is the supplied comparison chart; its title identifies the monthly rainfall comparison by station.\n\n"
+                "## Statistical choices and exclusions\n\nThe test fixture records two measurements each for North, South, East, and West; North is wettest in 2025-06 at 19.0 mm. The methods section records the statistical choices: `sample_stddev` uses sample standard deviation. Blank and nonnumeric measurements are reported as invalid source rows and rejected rather than silently excluded; the regression tests cover those choices.\n\n"
+                "## Verification\n\n`tests/test_rainfall.py` recorded " + test_result
+                + " in the supplied sandbox output (exit code 0). The chart and fixed test fixture are the available comparison evidence; no independent measurement run or coverage result is claimed.\n"
+            )
         return {
             "readme_markdown": (
-                f"# {title}\n\n{notes}\n\n## Run locally\n\n`{command}`\n\n"
+                f"# {title}\n\n{readme_notes}\n\n## Run locally\n\n`{command}`\n\n"
                 "## Tests\n\nRun `python -m pytest -q` from the project root.\n"
             ),
-            "report_markdown": (
-                f"# Project Report: {title}\n\n"
-                "## Deliverables\n\nThe project contains the implementation, focused regression tests, and local usage guidance.\n\n"
-                "## Verification\n\nThe final recorded sandbox test runs completed successfully with exit code zero.\n"
-            ),
-            "summary": f"Generate a concise README and project report for {title}.",
-            "evidence": ["The validated ProjectSpec, repository inventory, review, and sandbox test results were used."],
+            "report_markdown": f"# Project Report: {title}\n\n{report}",
+            "summary": f"Generate artifact-grounded README and project report for {title}.",
+            "evidence": ["The validated ProjectSpec, source excerpts, persisted AgentRun and ReviewResult records, sandbox output, and result artifacts were used."],
         }
 
     @staticmethod
@@ -654,8 +934,9 @@ class Phase6FixtureClient:
             return "README.md: describes the CLI, date/count inputs, and malformed-row behavior."
         if name == "web-app":
             return "web/index.html and web/app.js: contain associated labels, live error text, and the empty state."
+        if name == "erdos-gyarfas":
+            return "graphs/cycles.py and results/petersen_cycle_summary.json: show the finite Petersen graph analysis; human review must assess the conjecture and complexity caveat."
         return "README.md: explains sample standard deviation and invalid-row exclusion policy."
-
 
 class RecordingDispatcher:
     def __init__(self) -> None:
@@ -732,7 +1013,14 @@ def _docker_sandbox_or_skip() -> SandboxManager:
     return sandbox
 
 
-def _run_phase6_package_workflows(tmp_path: Path, sandbox: Any, filenames: tuple[str, ...] | list[str]) -> None:
+def _run_phase6_package_workflows(
+    tmp_path: Path,
+    sandbox: Any,
+    filenames: tuple[str, ...] | list[str],
+    *,
+    fail_packager: bool = False,
+    invalid_first_packager: bool = False,
+) -> None:
     for filename in filenames:
         fixture = json.loads((FIXTURE_DIR / filename).read_text(encoding="utf-8"))
         case_dir = tmp_path / fixture["name"]
@@ -743,7 +1031,11 @@ def _run_phase6_package_workflows(tmp_path: Path, sandbox: Any, filenames: tuple
         Base.metadata.create_all(db_engine)
         session_factory = make_session_factory(db_engine)
         repository_manager = GitWorkspaceManager(case_dir / "repos")
-        model_client = Phase6FixtureClient(fixture)
+        model_client = Phase6FixtureClient(
+            fixture,
+            fail_packager=fail_packager,
+            invalid_first_packager=invalid_first_packager,
+        )
         suite = ProjectForgeAgentSuite(
             config=_config(),
             client=model_client,
@@ -793,7 +1085,48 @@ def _run_phase6_package_workflows(tmp_path: Path, sandbox: Any, filenames: tuple
                 assert approved_plan.status_code == 200, approved_plan.text
 
                 final_gate = app.state.workflow_engine.drive(workflow_id)
+                if fail_packager:
+                    assert final_gate.state is WorkflowState.FAILED
+                    assert "packager provider call failed" in final_gate.failure_reason.casefold()
+                    assert "simulated packager provider outage" not in final_gate.failure_reason
+                    with session_factory() as session:
+                        failed_packager_run = session.scalar(select(AgentRunRow).where(
+                            AgentRunRow.workflow_id == workflow_id,
+                            AgentRunRow.agent_name == "packager",
+                        ))
+                    assert failed_packager_run is not None
+                    assert failed_packager_run.output_payload["provider_error"] is True
+                    assert failed_packager_run.output_payload["llm_calls"] == 1
+                    written_files = repository_manager.read_repository_context(project_id)
+                    assert "reports/PROJECT_REPORT.md" not in written_files
+                    expected_coder_readme = model_client.generated_files["readme-and-limitations"][0]["content"]
+                    assert written_files["README.md"].rstrip() == expected_coder_readme.rstrip()
+                    assert "ProjectForge will finalize this guide" not in written_files["README.md"]
+                    assert model_client.calls.count("packager") == 1
+                    continue
                 assert final_gate.state is WorkflowState.AWAITING_FINAL_APPROVAL, final_gate.failure_reason
+                groundedness = final_gate.result_payload["report_groundedness"]
+                assert groundedness["passed"] is True, groundedness["issues"]
+                assert groundedness["matched_terms"]
+                assert groundedness["matched_code_anchors"]
+                assert groundedness["matched_test_anchors"]
+                expected_packager_attempts = 2 if invalid_first_packager else 1
+                assert len(model_client.packager_inputs) == expected_packager_attempts
+                assert groundedness["regeneration_attempts"] == expected_packager_attempts - 1
+                packager_input = model_client.packager_inputs[-1]
+                if invalid_first_packager:
+                    assert "Previous report was rejected" in packager_input["regeneration_feedback"]
+                assert packager_input["code_summary"]["files"]
+                assert packager_input["sandbox_test_results"]
+                assert packager_input["agent_run_records"]
+                assert packager_input["review_result_records"]
+                if fixture["name"] == "erdos-gyarfas":
+                    artifacts = packager_input["experiment_output"]["artifacts"]
+                    assert any(
+                        item["path"] == "results/petersen_cycle_summary.json"
+                        and '"cycle_lengths": [5, 6, 8, 9]' in item["content_excerpt"]
+                        for item in artifacts
+                    )
                 final_bundle = client.get(f"/api/workflows/{workflow_id}/review")
                 assert final_bundle.status_code == 200, final_bundle.text
                 review = final_bundle.json()["review"]
@@ -806,6 +1139,9 @@ def _run_phase6_package_workflows(tmp_path: Path, sandbox: Any, filenames: tuple
                     if item["rubric_item"]["type"] == "human-judgment"
                 )
                 assert final_bundle.json()["changed_files"]
+                assert "README.md" in final_bundle.json()["changed_files"]
+                assert "reports/PROJECT_REPORT.md" in final_bundle.json()["changed_files"]
+                assert final_bundle.json()["report_groundedness"]["passed"] is True
                 assert final_bundle.json()["code_diff"]
 
                 approved_final = client.post(f"/api/workflows/{workflow_id}/approvals", json={
@@ -837,6 +1173,12 @@ def _run_phase6_package_workflows(tmp_path: Path, sandbox: Any, filenames: tuple
                     } <= names
                     assert any(name.startswith("tests/") for name in names)
                     assert not any(name.startswith(".git/") or name.startswith(".venv/") for name in names)
+                    report_text = archive.read("reports/PROJECT_REPORT.md").decode("utf-8")
+                    assert "## Final human checkpoint" in report_text
+                    assert "Decision: `approved`" in report_text
+                    if fixture["name"] == "erdos-gyarfas":
+                        assert "distinct lengths 5, 6, 8, and 9" in report_text
+                        assert "not a proof" in report_text
                     test_results = json.loads(archive.read("reports/TEST_RESULTS.json"))
                     assert test_results["all_passed"] is True
                     assert test_results["run_count"] >= 1
@@ -869,6 +1211,24 @@ def _run_phase6_package_workflows(tmp_path: Path, sandbox: Any, filenames: tuple
             db_engine.dispose()
 
 
+def test_erdos_gyarfas_fixture_code_passes_its_regressions_locally(tmp_path: Path):
+    """Execute the fixture's generated source and tests without requiring Docker."""
+    (tmp_path / "graphs").mkdir()
+    (tmp_path / "graphs" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "graphs" / "cycles.py").write_text(ERDOS_SOURCE, encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_erdos_gyarfas.py").write_text(ERDOS_TESTS, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "tests/test_erdos_gyarfas.py"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + "\\n" + completed.stderr
+    assert "4 passed" in completed.stdout
+
+
 class PassingSandboxStub:
     """Offline control-flow stub; it does not execute project code."""
 
@@ -894,11 +1254,31 @@ def test_all_phase3_fixtures_reach_downloadable_reviewed_packages(tmp_path: Path
     _run_phase6_package_workflows(
         tmp_path,
         _docker_sandbox_or_skip(),
-        ("simple_script.json", "web_app.json", "data_analysis.json"),
+        ("simple_script.json", "web_app.json", "data_analysis.json", "erdos_gyarfas.json"),
     )
 
 
-@pytest.mark.parametrize("filename", ["simple_script.json", "web_app.json", "data_analysis.json"])
+def test_packager_provider_error_fails_workflow_without_generating_boilerplate(tmp_path: Path):
+    """A transport failure must not produce or export canned documentation."""
+    _run_phase6_package_workflows(
+        tmp_path,
+        PassingSandboxStub(),
+        ["erdos_gyarfas.json"],
+        fail_packager=True,
+    )
+
+
+def test_invalid_grounding_is_regenerated_once_before_final_checkpoint(tmp_path: Path):
+    """Invalid generated content is retried once and only validated output is reviewed."""
+    _run_phase6_package_workflows(
+        tmp_path,
+        PassingSandboxStub(),
+        ["erdos_gyarfas.json"],
+        invalid_first_packager=True,
+    )
+
+
+@pytest.mark.parametrize("filename", ["simple_script.json", "web_app.json", "data_analysis.json", "erdos_gyarfas.json"])
 def test_all_phase3_fixture_package_api_flows_with_offline_sandbox_stub(tmp_path: Path, filename: str):
     """Exercise API, FSM, disclosure, and ZIP assembly without executing code."""
     _run_phase6_package_workflows(tmp_path, PassingSandboxStub(), [filename])

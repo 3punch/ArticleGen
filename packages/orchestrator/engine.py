@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
-from typing import Any, Literal, Mapping, Protocol, runtime_checkable
+from typing import Any, Literal, Mapping, Protocol, Sequence, runtime_checkable
 from uuid import UUID, uuid4
 import time
 
@@ -37,10 +37,12 @@ from projectforge_api.orm import (
     WorkflowRunRow,
 )
 from projectforge_schemas.models import (
+    AgentFileChange,
     AIUsageDisclosure,
     AgentUsageActivity,
     PlannerAgentResponse,
     ProjectSpec,
+    ReportGroundednessResult,
     RequirementAgentResponse,
     ReviewerAgentResponse,
     TaskFeedback,
@@ -81,6 +83,10 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, set[WorkflowState]] = {
 
 class WorkflowError(RuntimeError):
     pass
+
+
+class AgentOutputValidationFailure(WorkflowError):
+    """A model response failed its schema/grounding gate and may be regenerated."""
 
 
 class InvalidWorkflowTransition(WorkflowError):
@@ -580,6 +586,12 @@ class PostgresFSMEngine:
                     reviewer_summary = reviewer.summary
                 except ValueError:
                     reviewer_summary = str(raw_review.get("summary", "Legacy review output is not schema-shaped."))
+        grounding_payload = payload.get("report_groundedness")
+        report_groundedness = (
+            ReportGroundednessResult.model_validate(grounding_payload)
+            if stage == "final" and isinstance(grounding_payload, Mapping)
+            else None
+        )
         return WorkflowReviewBundle(
             workflow_id=workflow_id,
             project_id=run.project_id,
@@ -592,6 +604,7 @@ class PostgresFSMEngine:
             diff_truncated=truncated,
             review=reviewer,
             reviewer_summary=reviewer_summary,
+            report_groundedness=report_groundedness,
         )
 
     def cancel(self, workflow_id: UUID, *, reason: str) -> WorkflowRunRecord:
@@ -755,6 +768,8 @@ class PostgresFSMEngine:
                         if row.task_graph_id is None:
                             raise WorkflowError("review cannot run without the persisted task graph")
                         review_revision = int((row.result_payload or {}).get("review_revision", 0))
+                        task_graph = self._load_project_graph(row.project_id, row.task_graph_id)
+                        test_runs = self._workflow_test_runs(workflow_id)
                         result = self._call_agent(
                             workflow_id,
                             row.project_id,
@@ -762,10 +777,8 @@ class PostgresFSMEngine:
                             {
                                 "project_spec": project_spec.model_dump(mode="json"),
                                 "task_graph_id": str(row.task_graph_id),
-                                "task_graph": self._load_project_graph(
-                                    row.project_id, row.task_graph_id,
-                                ).model_dump(mode="json"),
-                                "test_runs": self._workflow_test_runs(workflow_id),
+                                "task_graph": task_graph.model_dump(mode="json"),
+                                "test_runs": test_runs,
                             },
                             call_key=f"{workflow_id}:review:v{review_revision}",
                         )
@@ -791,44 +804,90 @@ class PostgresFSMEngine:
                             )
                             self._cancel_incomplete_tasks(row.task_graph_id)
                         else:
+                            review_updates: dict[str, Any] = {
+                                "review": result.output,
+                                "review_revision": review_revision,
+                            }
+                            event_payload: dict[str, Any] = {}
+                            if not result.is_stub:
+                                agent_runs, review_results = self._workflow_packager_evidence(workflow_id)
+                                package_result, groundedness = self._generate_grounded_report(
+                                    workflow_id=workflow_id,
+                                    project_id=row.project_id,
+                                    review_revision=review_revision,
+                                    project_spec=project_spec,
+                                    task_graph=task_graph,
+                                    review_output=result.output,
+                                    test_runs=test_runs,
+                                    agent_runs=agent_runs,
+                                    review_results=review_results,
+                                )
+                                review_updates["package_documents"] = package_result.output
+                                review_updates["report_groundedness"] = groundedness.model_dump(mode="json")
+                                event_payload["report_groundedness"] = groundedness.model_dump(mode="json")
                             self._transition(
                                 workflow_id, WorkflowState.AWAITING_FINAL_APPROVAL,
                                 reason=(
+                                    "Automatable review checks passed and the project report passed its "
+                                    "deterministic groundedness gate; code, README, and report are ready "
+                                    "for the mandatory final human checkpoint."
+                                    if not result.is_stub else
                                     "Automatable review checks passed; human-judgment evidence and the "
                                     "code diff are ready for the mandatory final human gate."
                                 ),
                                 expected_state=WorkflowState.REVIEW,
                                 owner=owner,
-                                result_updates={
-                                    "review": result.output,
-                                    "review_revision": review_revision,
-                                },
+                                payload=event_payload,
+                                result_updates=review_updates,
                             )
                     elif state is WorkflowState.PACKAGE:
                         if row.task_graph_id is None:
                             raise WorkflowError("packaging cannot run without the persisted task graph")
-                        project_spec = self._workflow_spec(row)
                         test_runs = self._workflow_test_runs(workflow_id)
                         review_output = (row.result_payload or {}).get("review", {})
                         gate_decision = (row.result_payload or {}).get("final_gate_decision", {})
-                        result = self._call_agent(
-                            workflow_id,
-                            row.project_id,
-                            "packager",
-                            {
-                                "workflow_id": str(workflow_id),
-                                "project_spec": project_spec.model_dump(mode="json"),
-                                "task_graph": self._load_project_graph(
-                                    row.project_id, row.task_graph_id,
-                                ).model_dump(mode="json"),
-                                "review": review_output,
-                                "test_runs": test_runs,
-                                "final_gate_decision": gate_decision,
-                            },
-                            call_key=f"{workflow_id}:packager:v0",
-                        )
+                        package_documents = (row.result_payload or {}).get("package_documents")
+                        if isinstance(package_documents, Mapping):
+                            package = dict(package_documents)
+                            if self.package_manager is None:
+                                raise WorkflowError(
+                                    "production package documents require a configured package export manager"
+                                )
+                            package["final_gate_documentation"] = self._finalize_report_with_human_gate(
+                                row.project_id, workflow_id, gate_decision,
+                            )
+                        else:
+                            if self.package_manager is not None:
+                                raise WorkflowError(
+                                    "grounded package documents are missing at final packaging"
+                                )
+                            # The deterministic Phase 2 stub has no generated docs or
+                            # export manager. Keep it after human approval and visibly
+                            # mark it as test-only; production reports are generated and
+                            # checked before the human sees the final review bundle.
+                            result = self._call_agent(
+                                workflow_id,
+                                row.project_id,
+                                "packager",
+                                {
+                                    "workflow_id": str(workflow_id),
+                                    "project_spec": self._workflow_spec(row).model_dump(mode="json"),
+                                    "task_graph": self._load_project_graph(
+                                        row.project_id, row.task_graph_id,
+                                    ).model_dump(mode="json"),
+                                    "review": review_output,
+                                    "test_runs": test_runs,
+                                    "final_gate_decision": gate_decision,
+                                },
+                                call_key=f"{workflow_id}:packager:stub:v0",
+                            )
+                            if not result.is_stub:
+                                raise WorkflowError(
+                                    "production package documents were not generated before the final human checkpoint"
+                                )
+                            package = dict(result.output)
+
                         disclosure = self._build_disclosure(workflow_id, row.project_id)
-                        package = dict(result.output)
                         package["disclosure"] = disclosure.model_dump(mode="json")
                         package_export = None
                         if self.package_manager is not None:
@@ -841,17 +900,13 @@ class PostgresFSMEngine:
                             )
                             package_export = record.model_dump(mode="json")
                             package["export"] = package_export
-                        elif not (isinstance(self.agents, StubAgentSuite) or result.is_stub):
-                            raise WorkflowError(
-                                "a production Packager requires a configured package export manager"
-                            )
                         self._transition(
                             workflow_id, WorkflowState.DONE,
                             reason=(
-                                "Packager committed the documentation, derived the disclosure from this "
-                                "workflow's AgentRun audit trail, and created the downloadable bundle."
+                                "The pre-reviewed, grounded README/report were finalized with the explicit "
+                                "human decision; disclosure and downloadable bundle were built from audit data."
                                 if package_export is not None else
-                                "Test-only stub package completed after final human approval."
+                                "Test-only stub package metadata completed after final human approval."
                             ),
                             expected_state=WorkflowState.PACKAGE,
                             owner=owner,
@@ -1118,6 +1173,10 @@ class PostgresFSMEngine:
                 )
             if previous is not None:
                 previous_output = dict(previous.output_payload or {})
+                if previous_output.get("output_validation_failed") and agent_name == "packager":
+                    raise AgentOutputValidationFailure(
+                        str(previous_output.get("error", "previous Packager output failed validation"))
+                    )
                 if (previous_output.get("provider_error")
                         or previous_output.get("output_validation_failed")
                         or previous_output.get("preflight_error")):
@@ -1223,7 +1282,7 @@ class PostgresFSMEngine:
                         "model": completion.model, "idempotency_key": call_key,
                     },
                 )
-            raise WorkflowError(str(exc)) from exc
+            raise AgentOutputValidationFailure(str(exc)) from exc
         except Exception as exc:
             if reservation_id is not None:
                 config = getattr(self.agents, "config", None)
@@ -1583,6 +1642,186 @@ class PostgresFSMEngine:
                 "evidence": output.get("evidence", []),
             }
         return [latest[task_id] for task_id in sorted(latest)]
+
+    def _workflow_packager_evidence(
+        self,
+        workflow_id: UUID,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Load compact, persisted AgentRun and ReviewResult evidence for reporting."""
+        with self._session_factory() as session:
+            agent_rows = session.scalars(
+                select(AgentRunRow).where(
+                    AgentRunRow.workflow_id == workflow_id,
+                    AgentRunRow.agent_name != "packager",
+                ).order_by(AgentRunRow.timestamp, AgentRunRow.id)
+            ).all()
+            review_rows = session.scalars(
+                select(ReviewResultRow).where(
+                    ReviewResultRow.workflow_id == workflow_id,
+                ).order_by(ReviewResultRow.id)
+            ).all()
+
+        agent_runs: list[dict[str, Any]] = []
+        for row in agent_rows:
+            input_payload = row.input_payload or {}
+            output = row.output_payload or {}
+            task_node = input_payload.get("task_node") or {}
+            evidence = output.get("evidence", [])
+            if not isinstance(evidence, list):
+                evidence = [str(evidence)] if evidence else []
+            record: dict[str, Any] = {
+                "agent_run_id": str(row.id),
+                "agent_name": row.agent_name,
+                "timestamp": self._as_utc(row.timestamp).isoformat(),
+                "phase": str(output.get("phase") or input_payload.get("phase") or ""),
+                "task_id": str(
+                    output.get("task_id") or input_payload.get("task_id")
+                    or (task_node.get("id") if isinstance(task_node, Mapping) else "")
+                    or ""
+                ),
+                "status": str(output.get("status") or ""),
+                "summary": str(
+                    output.get("summary") or output.get("diagnosis")
+                    or output.get("plan_summary") or ""
+                ),
+                "evidence": [str(item) for item in evidence[:8]],
+            }
+            for key in ("passed", "exit_code", "timed_out"):
+                if key in output:
+                    record[key] = output[key]
+            for key in ("changed_paths", "files_written", "tested_files"):
+                value = output.get(key)
+                if isinstance(value, list):
+                    record[key] = value[:30]
+            agent_runs.append(record)
+
+        review_results = [
+            {
+                "review_result_id": str(row.id),
+                "rubric_item": dict(row.rubric_item or {}),
+                "status": row.status,
+                "passed": row.passed,
+                "recommendation": row.recommendation,
+                "evidence": [str(item) for item in (row.evidence or [])[:10]],
+                "reviewer_notes": row.reviewer_notes or "",
+            }
+            for row in review_rows
+        ]
+        return agent_runs, review_results
+
+    def _generate_grounded_report(
+        self,
+        *,
+        workflow_id: UUID,
+        project_id: UUID,
+        review_revision: int,
+        project_spec: ProjectSpec,
+        task_graph: TaskGraph,
+        review_output: Mapping[str, Any],
+        test_runs: Sequence[Mapping[str, Any]],
+        agent_runs: Sequence[Mapping[str, Any]],
+        review_results: Sequence[Mapping[str, Any]],
+    ) -> tuple[AgentInvocationResult, ReportGroundednessResult]:
+        """Generate once and automatically regenerate once after a deterministic rejection."""
+        feedback = ""
+        last_issue = ""
+        for attempt in range(2):
+            try:
+                result = self._call_agent(
+                    workflow_id,
+                    project_id,
+                    "packager",
+                    {
+                        "workflow_id": str(workflow_id),
+                        "project_spec": project_spec.model_dump(mode="json"),
+                        "task_graph": task_graph.model_dump(mode="json"),
+                        "review": dict(review_output),
+                        "test_runs": list(test_runs),
+                        "agent_runs": list(agent_runs),
+                        "review_results": list(review_results),
+                        "final_gate_decision": {"decision": "pending"},
+                        "regeneration_feedback": feedback,
+                    },
+                    call_key=(
+                        f"{workflow_id}:packager:review:v{review_revision}:attempt:{attempt}"
+                    ),
+                )
+            except AgentOutputValidationFailure as exc:
+                last_issue = str(exc)[:3500]
+                feedback = "Previous report was rejected by deterministic validation: " + last_issue
+                continue
+            grounding_data = result.output.get("groundedness_validation")
+            if not isinstance(grounding_data, Mapping):
+                raise WorkflowError(
+                    "Packager returned no deterministic groundedness validation record"
+                )
+            grounding_payload = dict(grounding_data)
+            grounding_payload["regeneration_attempts"] = attempt
+            groundedness = ReportGroundednessResult.model_validate(grounding_payload)
+            if not groundedness.passed:
+                raise WorkflowError(
+                    "Packager reported a failed groundedness result after response validation"
+                )
+            return result, groundedness
+        raise RetryLimitExceeded(
+            "Packager report failed deterministic groundedness validation after one "
+            f"automatic regeneration: {last_issue or feedback}"
+        )
+
+    def _finalize_report_with_human_gate(
+        self,
+        project_id: UUID,
+        workflow_id: UUID,
+        decision: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Append the actual final approval after the human has seen the report draft."""
+        if decision.get("decision") != "approve":
+            raise WorkflowError("only an approved final gate may enter package finalization")
+        if self.workspace_manager is None:
+            raise WorkflowError("report finalization requires the project Git workspace")
+        report_path = "reports/PROJECT_REPORT.md"
+        files = self.workspace_manager.read_context(
+            project_id,
+            read_scope=(report_path,),
+            max_files=1,
+            max_total_bytes=100_000,
+            max_file_bytes=100_000,
+        )
+        report = files.get(report_path)
+        if report is None:
+            raise WorkflowError("the reviewed project report is missing at final packaging")
+        marker = "## Final human checkpoint"
+        if marker in report:
+            report = report.split(marker, 1)[0].rstrip()
+        comment = self._escape_markdown_inline(decision.get("comment") or "none supplied")
+        timestamp = self._escape_markdown_inline(decision.get("timestamp") or "not recorded")
+        finalized = (
+            report.rstrip()
+            + f"\n\n{marker}\n\n"
+            + "- Decision: `approved`.\n"
+            + f"- Recorded at: `{timestamp}`.\n"
+            + f"- Comment: {comment}\n"
+        )
+        safe_suffix = "".join(character for character in str(workflow_id) if character.isalnum())[:16]
+        commit = self.workspace_manager.apply_changes_and_commit(
+            project_id,
+            task_id=f"finalize-{safe_suffix or 'approved'}",
+            agent_name="packager",
+            changes=[AgentFileChange(path=report_path, content=finalized)],
+            write_scope=("reports",),
+            summary="Record the explicit final human approval in the reviewed report",
+        )
+        return {
+            "commit_hash": commit.commit_hash,
+            "changed_paths": list(commit.changed_paths),
+            "report_path": report_path,
+        }
+
+    @staticmethod
+    def _escape_markdown_inline(value: Any) -> str:
+        cleaned = " ".join(str(value).split())[:1000]
+        return (cleaned.replace("\\", "\\\\").replace("`", "\\`")
+                .replace("|", "\\|").replace("<", "&lt;").replace(">", "&gt;"))
 
     def _build_disclosure(self, workflow_id: UUID, project_id: UUID) -> AIUsageDisclosure:
         with self._session_factory() as session:

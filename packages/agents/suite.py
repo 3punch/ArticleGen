@@ -27,6 +27,7 @@ from .packager import PackagerAgent
 from .reviewer import ReviewerAgent
 from .errors import AgentOutputValidationError
 from .git_workspace import CommitRecord, GitWorkspaceManager
+from .grounding import inspect_report_groundedness
 from .litellm_client import ChatModelClient, LiteLLMChatClient
 from .planner import PlannerAgent
 from .rag import PgVectorContextRetriever
@@ -40,8 +41,8 @@ class ProjectForgeAgentSuite:
 
     The LLMs return structured proposals only. The deterministic suite validates path
     permissions, writes/commits through ``GitWorkspaceManager``, and runs tests only
-    through the isolated ``SandboxManager``. Integration/review/packaging remain the
-    existing stubs until their phases are explicitly implemented.
+    through the isolated ``SandboxManager``. Review and packaging produce model-backed,
+    evidence-checked outputs; integration testing remains stubbed until implemented.
     """
 
     def __init__(
@@ -227,6 +228,9 @@ class ProjectForgeAgentSuite:
                 repository_files=payload.get("repository_files", {}),
                 test_runs=payload.get("test_runs", []),
                 final_gate_decision=payload.get("final_gate_decision", {}),
+                agent_runs=payload.get("agent_runs", []),
+                review_results=payload.get("review_results", []),
+                regeneration_feedback=str(payload.get("regeneration_feedback", "")),
             )
         else:
             return 1
@@ -521,20 +525,41 @@ class ProjectForgeAgentSuite:
             )
             if key in review_payload
         })
+        repository_files = payload.get("repository_files", {})
         test_runs = payload.get("test_runs", [])
+        agent_runs = payload.get("agent_runs", [])
+        review_results = payload.get("review_results", [])
         final_gate = payload.get("final_gate_decision", {})
         response, completion = self.packager_agent.run(
             project_spec,
             graph,
             review,
-            repository_files=payload.get("repository_files", {}),
+            repository_files=repository_files,
             test_runs=test_runs,
             final_gate_decision=final_gate,
+            agent_runs=agent_runs,
+            review_results=review_results,
+            regeneration_feedback=str(payload.get("regeneration_feedback", "")),
             timeout_seconds=payload.get("agent_timeout_seconds"),
         )
+        grounding = inspect_report_groundedness(
+            response.report_markdown,
+            project_spec,
+            repository_files=repository_files,
+            test_runs=test_runs,
+            agent_runs=agent_runs,
+            review_results=review_results,
+        )
+        if not grounding.passed:
+            raise AgentOutputValidationError(
+                "Packager report failed deterministic groundedness validation: "
+                + "; ".join(grounding.issues[:20]),
+                completion=completion,
+            )
+
         automated = [item for item in review.criteria if item.rubric_item.type == "automatable"]
         human = [item for item in review.criteria if item.rubric_item.type == "human-judgment"]
-        gate_decision = str(final_gate.get("decision", "approve"))
+        gate_decision = str(final_gate.get("decision", "pending"))
         report_markdown = response.report_markdown.rstrip() + "\n\n## Deterministic review record\n\n"
         report_markdown += (
             f"- Automatable checks: {sum(item.status == 'passed' for item in automated)} of "
@@ -560,6 +585,20 @@ class ProjectForgeAgentSuite:
             f"{sum(run.get('passed') is True for run in test_runs)} of {len(test_runs)} "
             "persisted TEST-phase sandbox runs passed. See `reports/TEST_RESULTS.json` in the bundle.\n"
         )
+        grounding = inspect_report_groundedness(
+            report_markdown,
+            project_spec,
+            repository_files=repository_files,
+            test_runs=test_runs,
+            agent_runs=agent_runs,
+            review_results=review_results,
+        )
+        if not grounding.passed:
+            raise AgentOutputValidationError(
+                "Final report failed deterministic groundedness validation after audit sections were added: "
+                + "; ".join(grounding.issues[:20]),
+                completion=completion,
+            )
         changes = [
             AgentFileChange(path="README.md", content=response.readme_markdown.rstrip() + "\n"),
             AgentFileChange(path="reports/PROJECT_REPORT.md", content=report_markdown),
@@ -582,6 +621,7 @@ class ProjectForgeAgentSuite:
             "documentation_commit_hash": commit.commit_hash,
             "changed_paths": list(commit.changed_paths),
             "prompt_version": self.packager_agent.prompt_version,
+            "groundedness_validation": grounding.to_dict(),
             "llm_calls": 1,
             "code_executed": False,
             "code_execution_count": 0,
@@ -589,7 +629,7 @@ class ProjectForgeAgentSuite:
             "scope": list(payload.get("agent_scope", STUB_AGENT_SCOPES["packager"])),
             "evidence": [
                 *response.evidence,
-                "README.md and reports/PROJECT_REPORT.md committed to the project Git workspace.",
+                "README.md and reports/PROJECT_REPORT.md committed before the final human checkpoint.",
                 (f"Documentation commit: {commit.commit_hash}." if commit.commit_hash else
                  "Generated documentation matched the current files; no empty Git commit was created."),
                 "Human-judgment criteria remain labeled for human review; no model verdict was recorded as a pass.",
