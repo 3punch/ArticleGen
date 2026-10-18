@@ -104,6 +104,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         config.score_target = args.target
     if args.provider:
         config.provider = args.provider
+    if getattr(args, "model", None):
+        config.model = args.model
     if args.workspace:
         config.workspace = args.workspace
     if args.changelog:
@@ -280,7 +282,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("brief")
     run.add_argument("--iterations", type=int, default=None)
     run.add_argument("--target", type=float, default=None, help="quality score target")
-    run.add_argument("--provider", default=None, choices=["auto", "anthropic", "openai", "offline"])
+    run.add_argument("--provider", default=None,
+                     choices=["auto", "anthropic", "openai", "dahl", "offline"])
+    run.add_argument("--model", default=None,
+                     help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     run.add_argument("--workspace", default=None)
     run.add_argument("--changelog", default=None)
     run.add_argument("--config", default=None)
@@ -307,7 +312,10 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--iterations", type=int, default=None)
     demo.add_argument("--workspace", default=None)
     demo.add_argument("--changelog", default=None)
-    demo.add_argument("--provider", default=None, choices=["auto", "anthropic", "openai", "offline"])
+    demo.add_argument("--provider", default=None,
+                      choices=["auto", "anthropic", "openai", "dahl", "offline"])
+    demo.add_argument("--model", default=None,
+                      help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     demo.add_argument("--config", default=None)
     demo.add_argument("--cap", type=int, default=None)
     demo.add_argument("--target", type=float, default=None)

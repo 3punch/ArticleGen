@@ -1,14 +1,18 @@
 """LLM provider abstraction.
 
-Three engines behind one interface:
+Four engines behind one interface:
 
-* ``AnthropicClient`` / ``OpenAIClient`` - real calls over HTTPS, standard library
-  only (``urllib``), so the package keeps zero runtime dependencies.
+* ``AnthropicClient`` / ``OpenAIClient`` / ``DahlClient`` - real calls over HTTPS,
+  standard library only (``urllib``), so the package keeps zero runtime dependencies.
 * ``OfflineClient`` - the default when no API key is present. It reports
   ``available = False`` and the agents fall back to their deterministic engines.
 
+``DahlClient`` talks to the Dahl inference API
+(``https://inference.dahl.global/v1``), which is OpenAI-compatible chat
+completions with Bearer authentication.
+
 **Verification status:** the offline path is exercised by the test suite and by a
-full end-to-end run. The two network clients are *not* callable from this sandbox
+full end-to-end run. The network clients are *not* callable from this sandbox
 (egress is limited to GitHub/PyPI/npm), so their request shape is implemented but
 unverified against the live APIs.
 """
@@ -151,25 +155,54 @@ class OpenAIClient(_HTTPClient):
             text=text or "",
             tokens_in=int(usage.get("prompt_tokens", 0) or 0),
             tokens_out=int(usage.get("completion_tokens", 0) or 0),
-            engine=f"openai:{self.model}",
+            engine=f"{self.engine_name}:{self.model}",
         )
+
+
+class DahlClient(OpenAIClient):
+    """Dahl inference API - OpenAI-compatible chat completions.
+
+    Endpoints like ``https://inference.dahl.global/v1/chat/completions`` speak the
+    standard OpenAI wire format with ``Authorization: Bearer`` auth, so this is the
+    OpenAI client with a different origin and default model. The model catalog
+    rotates; ``DAHL_MODEL`` / ``DAHL_BASE_URL`` override the defaults at resolve
+    time (see :func:`resolve_client`).
+    """
+
+    engine_name = "dahl"
+    DEFAULT_BASE_URL = "https://inference.dahl.global/v1"
+    DEFAULT_MODEL = "zai-org/GLM-5.3-Flash"
+
+    def __init__(self, api_key: str, model: str = DEFAULT_MODEL,
+                 base_url: str = DEFAULT_BASE_URL, timeout: int = 120) -> None:
+        super().__init__(api_key, model, base_url, timeout)
 
 
 def resolve_client(provider: str = "auto", model: Optional[str] = None) -> LLMClient:
     """Pick an engine from explicit choice or environment.
 
-    ``auto`` prefers Anthropic, then OpenAI, then offline. An explicitly requested
-    provider whose key is missing returns an unavailable client rather than raising,
-    so a CI run degrades to deterministic output instead of failing.
+    ``auto`` prefers Anthropic, then OpenAI, then Dahl, then offline. An explicitly
+    requested provider whose key is missing returns an unavailable client rather
+    than raising, so a CI run degrades to deterministic output instead of failing.
+
+    Dahl reads ``DAHL_API_KEY`` and optionally ``DAHL_MODEL`` and ``DAHL_BASE_URL``
+    (defaults: ``zai-org/GLM-5.3-Flash`` and ``https://inference.dahl.global/v1``).
     """
     provider = (provider or "auto").lower()
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    dahl_key = os.environ.get("DAHL_API_KEY", "").strip()
 
     if provider in ("auto", "anthropic") and anthropic_key:
         return AnthropicClient(anthropic_key, model or "claude-sonnet-4-5")
     if provider in ("auto", "openai") and openai_key:
         return OpenAIClient(openai_key, model or "gpt-4o-mini")
+    if provider in ("auto", "dahl") and dahl_key:
+        dahl_model = (model or os.environ.get("DAHL_MODEL", "").strip()
+                      or DahlClient.DEFAULT_MODEL)
+        dahl_base = (os.environ.get("DAHL_BASE_URL", "").strip()
+                     or DahlClient.DEFAULT_BASE_URL)
+        return DahlClient(dahl_key, dahl_model, dahl_base)
     return OfflineClient()
 
 
