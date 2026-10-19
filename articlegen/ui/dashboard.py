@@ -338,7 +338,9 @@ with tab_brief:
             result = orchestrator.run(brief)
 
         st.session_state["draft_markdown"] = (
-            result.final_draft.to_markdown() if result.final_draft else ""
+            result.final_draft.to_markdown()
+            if result.final_draft and any(s.body.strip() for s in result.final_draft.sections)
+            else ""
         )
         st.session_state["run_meta"] = {
             "status": result.status,
@@ -421,8 +423,13 @@ with tab_draft:
     markdown = st.session_state.get("draft_markdown", "")
     meta = st.session_state.get("run_meta") or {}
     if not markdown:
-        st.info("No draft yet. Run the pipeline from the Brief tab.")
+        if meta:
+            st.error(f"No article was produced: {meta.get('stop_reason', 'generation failed')}")
+        else:
+            st.info("No draft yet. Run the pipeline from the Brief tab.")
     else:
+        if meta.get("status") != "PASS":
+            st.warning(f"This draft needs review: {meta.get('stop_reason', 'quality target not met')}")
         toolbar = st.columns([2, 1, 1, 2])
         toolbar[0].metric("Words", len(markdown.split()))
         toolbar[1].metric("Score", f"{meta.get('final_score', 0):.4f}")

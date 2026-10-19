@@ -253,3 +253,40 @@ def test_parse_json_tolerates_fences_and_preamble():
     assert parse_json('prefix {"b": [1, 2]} suffix') == {"b": [1, 2]}
     with pytest.raises(ResponseParseError):
         parse_json("no json here at all")
+
+
+@pytest.mark.parametrize("kind", ["empty", "missing", "duplicate", "unknown", "non-list", "bad-body", "bad-target"])
+def test_build_draft_rejects_unusable_model_output(valid_brief, kind):
+    sections = [{"id": s.id, "body": "Model-written content."} for s in valid_brief.sections]
+    if kind == "empty":
+        for section in sections:
+            section["body"] = "  "
+    elif kind == "missing":
+        sections.pop()
+    elif kind == "duplicate":
+        sections.append(sections[0])
+    elif kind == "unknown":
+        sections[0]["id"] = "invented-section"
+    elif kind == "non-list":
+        sections = {"id": "introduction", "body": "Not a list"}
+    elif kind == "bad-body":
+        sections[0]["body"] = {"text": "Not Markdown"}
+    elif kind == "bad-target":
+        sections[0]["word_target"] = "invalid"
+    assert build_draft({"sections": sections}, valid_brief, 1) is None
+
+
+def test_required_context_overflow_never_calls_the_model(valid_brief):
+    from articlegen.memory import AssembledContext
+
+    class NoCallClient:
+        available = True
+
+        def complete(self, *args, **kwargs):
+            pytest.fail("Must not send incomplete required content to the model")
+
+    writer = build_agents(NoCallClient(), TokenBudget.default())[0]
+    report = writer.run(AssembledContext(text="truncated", breached_cap=True),
+                        valid_brief, Draft.from_brief(valid_brief), 1)
+    assert report.status == AgentStatus.DEGRADED
+    assert "Required context does not fit" in report.notes[-1]

@@ -205,6 +205,17 @@ class Orchestrator:
         status = self._final_status(final_score, final_gate, records,
                                     score_target=self.config.score_target)
 
+        failures = [
+            f"{report.agent_id}: {note}"
+            for record in records for report in record.reports
+            if report.status == AgentStatus.DEGRADED
+            for note in report.notes
+        ]
+        if failures:
+            stop_reason = f"{stop_reason or 'loop exited'}; generation failed: {failures[-1]}"
+        if not any(section.body.strip() for section in draft.sections):
+            stop_reason = f"No article content was generated. {stop_reason}"
+
         store.write_master_draft(draft)
         store.drop_notes()
         store.save_state()
@@ -259,6 +270,7 @@ class Orchestrator:
                 budget=self.config.budget,
                 iteration=iteration,
                 draft_required=agent.draft_required,
+                peer_reports=reports,
             )
             evicted.extend(packet.evicted)
             store.write_text(iteration, f"context-{agent.agent_id}.txt", packet.text)
@@ -277,13 +289,16 @@ class Orchestrator:
             report = agent.run(packet, brief, draft, iteration, peer_reports=reports,
                                open_findings=store.open_findings)
             reports.append(report)
-            store.write_json(iteration, "report-synthesizer.json", report.to_dict())
             tokens_used += report.tokens_in + report.tokens_out
 
-            new_draft = build_draft(report.payload, brief, draft.version)
+            new_draft = (build_draft(report.payload, brief, draft.version)
+                         if report.status != AgentStatus.DEGRADED else None)
             if new_draft is None:
                 report.status = AgentStatus.DEGRADED
-                report.notes.append("synthesizer returned no usable draft; master draft unchanged")
+                report.notes.append(
+                    "synthesizer returned no usable draft (expected outline sections "
+                    "with article text); master draft unchanged"
+                )
             else:
                 draft = new_draft
                 self.events.emit(EventType.DRAFT_UPDATED, task_id=brief.task_id,
@@ -293,6 +308,8 @@ class Orchestrator:
                                  sections=len(draft.sections),
                                  applied=len(report.payload.get("applied") or []),
                                  deferred=len(report.payload.get("deferred") or []))
+            # Persist after validation so disk reports agree with events/status.
+            store.write_json(iteration, "report-synthesizer.json", report.to_dict())
             self._emit_agent_done(agent, report, iteration, brief.task_id,
                                   len(packet.evicted), packet.tokens)
 

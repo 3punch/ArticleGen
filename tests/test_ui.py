@@ -910,3 +910,42 @@ def test_unchanged_form_stays_runnable_after_validation():
 
     assert [b for b in test.button if "Run orchestrated" in b.label][0].disabled is False
     assert not any("changed since you validated" in w.value for w in test.warning)
+
+
+@requires_streamlit
+def test_empty_generation_shows_failure_instead_of_article_download(tmp_path, monkeypatch, model_client,
+                                                                  example_brief_dict):
+    from articlegen.llm import LLMResponse
+
+    original_complete = model_client.complete
+
+    def empty_synthesis(system, user, *, max_output_tokens=1000):
+        response = original_complete(system, user, max_output_tokens=max_output_tokens)
+        if "# Agent 5 — Synthesizer" not in system:
+            return response
+        payload = json.loads(response.text)
+        for section in payload["sections"]:
+            section["body"] = ""
+        return LLMResponse(text=json.dumps(payload), tokens_in=10, tokens_out=10,
+                           engine="test-llm:empty")
+
+    monkeypatch.setattr(model_client, "complete", empty_synthesis)
+    monkeypatch.setattr("articlegen.llm.resolve_client", lambda **kwargs: model_client)
+    test = AppTest.from_file(APP_PATH, default_timeout=120)
+    test.run()
+    for widget in test.sidebar.text_input:
+        if widget.label == "Workspace":
+            widget.set_value(str(tmp_path / "runs"))
+        elif widget.label == "Change log":
+            widget.set_value(str(tmp_path / "change_log.md"))
+    test.sidebar.slider[0].set_value(1)
+    test.run()
+    _fill_and_validate(test, example_brief_dict)
+    [b for b in test.button if "Run orchestrated" in b.label][0].click()
+    test.run()
+
+    assert not test.exception, test.exception
+    assert test.session_state["run_meta"]["status"] == "NEEDS_HUMAN"
+    assert test.session_state["draft_markdown"] == ""
+    assert any("No article was produced" in error.value for error in test.error)
+    assert not [d for d in test.download_button if "Download Article" in d.label]

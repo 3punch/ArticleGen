@@ -222,3 +222,67 @@ def test_score_iteration_penalises_blockers_more_than_notes(valid_brief):
     blockers = score_iteration(valid_brief, draft, [report_with(Severity.BLOCKER)])
     notes = score_iteration(valid_brief, draft, [report_with(Severity.NOTE)])
     assert notes.total > blockers.total
+
+
+def test_writer_prose_reaches_every_downstream_model(tmp_path, valid_brief):
+    """Unlike the generic fixture, the Synthesizer can only copy supplied prose."""
+    import json
+    from articlegen.llm import LLMClient, LLMResponse
+
+    class HandoffClient(LLMClient):
+        available = True
+        engine_name = "handoff-test"
+
+        def __init__(self):
+            self.inputs = {}
+
+        def complete(self, system, user, *, max_output_tokens=1000):
+            agent = user.split(" |", 1)[0].removeprefix("agent: ")
+            self.inputs[agent] = user
+            if agent == "writer":
+                payload = {"sections": [
+                    {"id": s.id, "body": f"Writer-only prose for {s.id}."}
+                    for s in valid_brief.sections
+                ]}
+            else:
+                block = user.split("### working_draft\n", 1)[1].split("\n\n### ", 1)[0]
+                working = json.loads(block)
+                assert all(s["body"] == f"Writer-only prose for {s['id']}."
+                           for s in working["sections"])
+                payload = working if agent == "synthesizer" else {"findings": []}
+            return LLMResponse(text=json.dumps(payload), tokens_in=10, tokens_out=10,
+                               engine="handoff-test")
+
+    client = HandoffClient()
+    result = Orchestrator(_config(tmp_path, max_iterations=1), client=client).run(valid_brief)
+    assert list(client.inputs) == ["writer", "tester", "reviewer", "architect", "synthesizer"]
+    assert result.final_draft.version == 1
+    assert all(s.body == f"Writer-only prose for {s.id}." for s in result.final_draft.sections)
+    assert all(not s.body for s in valid_brief.sections)
+    assert "Writer-only prose" not in client.inputs["writer"]
+
+
+def test_empty_synthesis_is_degraded_and_explained(tmp_path, valid_brief):
+    import json
+    from articlegen.llm import LLMClient, LLMResponse
+
+    class EmptyClient(LLMClient):
+        available = True
+        engine_name = "empty-test"
+
+        def complete(self, system, user, *, max_output_tokens=1000):
+            return LLMResponse(text=json.dumps({"sections": [
+                {"id": s.id, "title": s.title, "body": ""} for s in valid_brief.sections
+            ]}), tokens_in=10, tokens_out=10, engine="empty-test")
+
+    from articlegen.models import AgentStatus
+    result = Orchestrator(_config(tmp_path, max_iterations=1), client=EmptyClient()).run(valid_brief)
+    assert result.status == "NEEDS_HUMAN"
+    assert result.final_draft.version == 0
+    assert "No article content was generated" in result.stop_reason
+    assert "synthesizer" in result.stop_reason
+    report = result.iterations[0].reports[-1]
+    assert report.status == AgentStatus.DEGRADED
+    persisted = json.loads((tmp_path / "runs" / valid_brief.task_id / "iterations" /
+                            "iter-01" / "report-synthesizer.json").read_text())
+    assert persisted["status"] == AgentStatus.DEGRADED.value
