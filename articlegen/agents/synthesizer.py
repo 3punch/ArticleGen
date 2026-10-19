@@ -218,17 +218,24 @@ class Synthesizer(BaseAgent):
 def build_draft(payload: Dict[str, Any], brief: Brief, previous_version: int) -> Optional[Draft]:
     """Turn a Synthesizer payload into the new master draft."""
     sections = payload.get("sections")
-    if not sections:
+    if not isinstance(sections, list) or not sections:
         return None
     parsed: List[Section] = []
+    seen = set()
     for item in sections:
         if not isinstance(item, dict):
-            continue
-        section = Section.from_dict(item)
-        if not section.id:
-            continue
+            return None
+        section_id, body = item.get("id"), item.get("body")
+        if (not isinstance(section_id, str) or section_id not in brief.section_ids
+                or section_id in seen or not isinstance(body, str)):
+            return None
+        seen.add(section_id)
+        try:
+            section = Section.from_dict(item)
+        except (TypeError, ValueError):
+            return None
         parsed.append(section)
-    if not parsed:
+    if seen != set(brief.section_ids) or not any(s.body.strip() for s in parsed):
         return None
     return Draft(
         task_id=brief.task_id,

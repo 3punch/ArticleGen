@@ -64,3 +64,23 @@ def test_summarise_text_prefers_high_signal_sentences():
     summary = summarise_text(text, 40)
     assert "blocker" in summary.lower() or "never" in summary.lower()
     assert count_tokens(summary) <= 40
+
+
+def test_working_draft_overlays_writer_delta_without_mutating_master(valid_brief):
+    import json
+    from articlegen.memory import working_draft_block
+    from articlegen.models import AgentReport, Draft
+
+    draft = Draft.from_brief(valid_brief)
+    for section in draft.sections:
+        section.body = f"Original text for {section.id}."
+    reports = [AgentReport(agent_id="writer", role="Writer", iteration=2, payload={
+        "sections": [{"id": "mechanism", "body": "New model-written mechanism."}]
+    })]
+    working = json.loads(working_draft_block(draft, reports))
+    assert [s["id"] for s in working["sections"]] == valid_brief.section_ids
+    assert working["sections"][0]["body"] == draft.sections[0].body
+    assert working["sections"][1]["body"] == "New model-written mechanism."
+    assert working["sections"][2]["body"] == draft.sections[2].body
+    assert draft.sections[1].body == "Original text for mechanism."
+    assert draft.version == 0

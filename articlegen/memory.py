@@ -17,9 +17,9 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
-from .models import Draft, Finding, Severity
+from .models import AgentReport, Draft, Finding, Severity
 from .tokens import TokenBudget, count_tokens, truncate_to_tokens
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
@@ -247,6 +247,28 @@ def draft_block(draft: Draft, max_tokens: int) -> str:
     return truncate_to_tokens(text, max_tokens)
 
 
+def working_draft_block(draft: Draft, peer_reports: List[AgentReport]) -> str:
+    """Render current-iteration Writer proposals, not raw agent transcripts.
+
+    This is an advisory view only: it never mutates or versions the master draft.
+    All downstream models must see the prose they are checking/merging, including
+    unchanged sections from the master when the Writer returns a delta.
+    """
+    sections = {section.id: {"id": section.id, "title": section.title,
+                             "body": section.body} for section in draft.sections}
+    for report in peer_reports:
+        if report.agent_id != "writer":
+            continue
+        for item in report.payload.get("sections") or []:
+            if not isinstance(item, dict):
+                continue
+            section_id, body = item.get("id"), item.get("body")
+            if section_id in sections and isinstance(body, str) and body.strip():
+                sections[section_id]["body"] = body
+    return json.dumps({"title": draft.title, "sections": list(sections.values())},
+                      ensure_ascii=False, separators=(",", ":"))
+
+
 #: Writer remit mirrored from the Writer agent (kept literal to avoid a
 #: circular import through the agents package).
 _WRITER_REMIT = {"readability", "clarity", "completeness", "flow", "redundancy",
@@ -383,26 +405,39 @@ class MemoryStore:
     # -- context packet ---------------------------------------------------
     def build_packet(self, *, agent_id: str, brief, draft: Draft, rules_digest: str,
                      budget: TokenBudget, iteration: int,
-                     draft_required: bool) -> AssembledContext:
+                     draft_required: bool,
+                     peer_reports: Optional[List[AgentReport]] = None) -> AssembledContext:
         """Assemble the bounded context for one agent call."""
         agent_budget = budget.agent(agent_id)
-        if agent_id == "writer":
+        draft_key = "master_draft"
+        if agent_id != "writer" and peer_reports:
+            # Keep the actual prose once, rather than duplicating Writer output
+            # alongside an obsolete master. Let assemble enforce the hard cap;
+            # pre-truncating JSON would silently hide the final sections.
+            draft_key = "working_draft"
+            draft_text_fn = lambda: working_draft_block(draft, peer_reports)
+        elif agent_id == "writer":
             # Delta packet: full text only for sections the Writer may change.
             draft_text_fn = lambda: writer_delta_block(brief, draft, self.open_findings,
                                                        max_tokens=agent_budget.max_input_tokens // 2)
         else:
             draft_text_fn = lambda: draft_block(draft, max_tokens=agent_budget.max_input_tokens // 2)
-        agent_budget = budget.agent(agent_id)
         header = (
             f"agent: {agent_id} | iteration: {iteration} | task: {brief.task_id}\n"
             f"context_hard_cap: {budget.context_hard_cap} tokens | "
             f"agent_input_cap: {agent_budget.max_input_tokens} tokens\n"
             "Rule: work only from the material below. Do not assume unseen history."
         )
+        if draft_key == "working_draft":
+            header += (
+                "\nworking_draft is the master with this iteration's Writer revisions "
+                "overlaid. Review/merge these bodies, not the old empty outline. "
+                "It is advisory; only the Synthesizer may publish a new master."
+            )
         blocks = [
             Block(1, "system_rules_digest", rules_digest, required=True),
             Block(2, "task_brief", outline_block(brief), required=True),
-            Block(3, "master_draft", draft_text_fn(),
+            Block(3, draft_key, draft_text_fn(),
                   required=draft_required),
             Block(4, "open_findings", findings_block(self.open_findings), required=False),
             Block(5, "rolling_history", self.rolling.render() or "no prior iterations",

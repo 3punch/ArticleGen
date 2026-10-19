@@ -87,7 +87,12 @@ class BaseAgent:
         if context.truncated:
             notes.append(f"context truncated to meet cap: {', '.join(context.truncated)}")
 
-        if not self.client.available:
+        if context.breached_cap:
+            status = AgentStatus.DEGRADED
+            notes.append("Required context does not fit the token budget; no model call was made.")
+            engine = "context:error"
+            payload = {"_error": "required context does not fit", "sections": [], "findings": []}
+        elif not self.client.available:
             status = AgentStatus.DEGRADED
             notes.append(
                 f"LLM provider '{self.client.engine_name}' is not configured; "
