@@ -54,12 +54,17 @@ Execution order is fixed and non-negotiable (rule 4.2 in `claude.md`):
 ## Quick start
 
 ```bash
-# No installation needed - standard library only.
+# Verify is local; article generation requires an LLM provider key.
 python3 -m articlegen verify examples/brief_example.json   # gate only, zero tokens
+export DAHL_API_KEY='<Dahl API key>'
+export DAHL_MODEL='zai-org/GLM-5.3-Flash'                  # optional; default shown
 python3 -m articlegen demo                                 # full loop on the example brief
 python3 -m articlegen run path/to/brief.json --iterations 4
 python3 -m articlegen log                                  # summarise change_log.jsonl
 ```
+
+Without a provider key, a run stops before creating a draft. There is no offline
+article-generation fallback.
 
 Or with the console script after `pip install -e .`:
 
@@ -106,7 +111,10 @@ articlegen ui --no-cors       # when served behind a reverse proxy that rewrites
 | **📜 Change Log** | `change_log.md` as written by the pipeline, plus the parsed JSONL mirror as a sortable table. |
 
 Run settings (max iterations, target score, context hard cap, provider, workspace,
-change-log path) live in the sidebar.
+change-log path) live in the sidebar. The Dahl section accepts the API key in a
+masked password field plus a model ID; the key remains in session state only and is
+never copied to the brief, config file, or run log. The Run button stays disabled until
+the selected provider has a key.
 
 ### How the live updates work
 
@@ -180,14 +188,13 @@ Three levers keep the run's spend at the floor without touching quality:
   only for sections it is allowed to change (under target or named in an open
   finding); untouched sections are reduced to one `(unchanged, N words)` attestation.
   Its context falls from O(draft) to O(needed work).
-* **Repairs converge.** Reviewer findings that land inside the Writer's remit are
-  fixed mechanically (filler removal, long-sentence/paragraph splitting,
-  contraction expansion, word dedup) instead of re-generating the same scaffold —
-  so a finding resolves the iteration after it appears rather than pacing the loop.
+* **Repairs converge.** Existing draft text can be cleaned mechanically (filler
+  removal, long-sentence/paragraph splitting, contraction expansion, word dedup).
+  When new content is needed, the Writer requests it from the configured model; there
+  is no static article scaffold or offline drafting fallback.
 
-On the bundled demo these levers turn a 27,050-token estimate into ~23,000, and the
-converging iteration drops roughly a quarter — before the budget caps that
-hard-limit real provider calls are accounted for.
+The savings depend on the brief and provider: skipped calls and smaller delta packets
+reduce spend, while all new writing still comes from the configured LLM.
 
 **Priority eviction.** A context packet is assembled from prioritised blocks; when the
 cap would be breached, low-priority blocks are dropped and the eviction is written to
@@ -215,13 +222,14 @@ because it is re-sent on every one of the five agent calls, every iteration.
 
 `change_log.md` is append-only and locked during writes (`fcntl`), with a JSONL mirror
 for tooling. Each iteration records the gate result, per-agent status and engine, score
-movement, findings applied/deferred, token spend, and any context eviction:
+movement, findings applied/deferred, token spend, and any context eviction. The values
+below are an illustrative model-backed log shape:
 
 ```markdown
 ## [2026-10-11T16:43:51Z] task=demo-article · iteration 2 · decision=CONTINUE
 
 - gate: PASS (5 minor) at draft_verification
-- agents: writer=ok/0f/offline-heuristic · tester=ok/0f/offline-heuristic · …
+- agents: writer=ok/0f/dahl:zai-org/GLM-5.3-Flash · tester=ok/0f/dahl:zai-org/GLM-5.3-Flash · …
 - score: 0.7241 → **0.9169** (Δ+0.1928)
 - findings: 6 raised · 1 applied · 5 deferred
 - context: cap=6000 evicted=none
@@ -281,7 +289,7 @@ tests/                 # gate, agents, memory, loop, CLI and dashboard coverage
 | `anthropic` | `ANTHROPIC_API_KEY` set (or `--provider anthropic`) | real model calls via `urllib` |
 | `openai` | `OPENAI_API_KEY` set (or `--provider openai`) | real model calls via `urllib` |
 | `dahl` | `DAHL_API_KEY` set (or `--provider dahl`) | real model calls via `urllib` against the Dahl inference API |
-| `offline-heuristic` | no key (default) | deterministic rule-based engines |
+| `unconfigured` | no usable provider key | run stops before the agent loop; no draft is generated |
 
 The `dahl` provider speaks the OpenAI-compatible chat-completions protocol at
 `https://inference.dahl.global/v1/chat/completions` (Bearer auth). Defaults and
@@ -295,19 +303,18 @@ export DAHL_BASE_URL='https://inference.dahl.global/v1'   # optional; the defaul
 articlegen run brief.json --provider dahl --model zai-org/GLM-5.3-Flash
 ```
 
-The offline engine is **not** a model. It runs genuine checks — Python blocks are
-actually compiled, anchors are actually resolved, metric contradictions are actually
-detected — and its Writer drafts role-composed professional prose from the brief:
-paragraphs are built from framing → audience → method → integrity → risk → payoff
-sentence pools with a no-repeat guarantee per section, distinct section openings, a
-closing takeaway, and a brief-objective anchor quoted in the first drafted section.
-It exists so the loop, the budgets, the scoring and the convergence logic are
-testable and runnable without credentials. Every report and change-log line names
-the engine that produced it.
+ArticleGen does **not** generate articles offline. If no usable API key is configured,
+the orchestrator stops before creating a draft and explains how to configure a provider.
+The deterministic checkers remain available to unit tests, but they are not a writing
+engine and the Writer contains no static sentence-template pool.
 
-**Verification status:** the offline path is covered by the test suite and a full
-end-to-end run. The three network clients are implemented but were not exercised
-against the live APIs.
+In the dashboard sidebar, choose `dahl`, enter the API key in the password field, and
+set the model ID (default: `zai-org/GLM-5.3-Flash`). The key is held only in the
+Streamlit session and is not written to the brief, config, or run logs. For CLI runs,
+set `DAHL_API_KEY` and optionally `DAHL_MODEL` in the environment.
+
+**Verification status:** provider request formats are covered by stubbed HTTP tests;
+this sandbox cannot call the live Dahl/Anthropic/OpenAI endpoints.
 
 ---
 

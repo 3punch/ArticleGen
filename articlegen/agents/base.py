@@ -1,12 +1,9 @@
 """Shared machinery for the five specialised sub-agents.
 
-Every agent runs the same skeleton: assemble prompt -> call the engine (LLM if a
-provider is configured, deterministic engine otherwise) -> normalise the result into
-an ``AgentReport``. Subclasses only supply the deterministic engine and the mapping
-from payload to findings.
-
-The split matters for verification: when no API key exists the loop still runs end to
-end, and its behaviour is checkable by tests rather than dependent on a model call.
+Every agent runs the same skeleton: assemble prompt -> call the configured LLM ->
+normalise the result into an ``AgentReport``. Rule-based deterministic hooks remain
+for isolated checker tests; they are not a substitute for model-generated writing.
+Production orchestration fails before the agent loop if no LLM is configured.
 """
 
 from __future__ import annotations
@@ -90,7 +87,15 @@ class BaseAgent:
         if context.truncated:
             notes.append(f"context truncated to meet cap: {', '.join(context.truncated)}")
 
-        if self.client.available:
+        if not self.client.available:
+            status = AgentStatus.DEGRADED
+            notes.append(
+                f"LLM provider '{self.client.engine_name}' is not configured; "
+                "no content was generated."
+            )
+            engine = f"{self.client.engine_name}:not-configured"
+            payload = {"_error": "provider not configured", "sections": [], "findings": []}
+        else:
             try:
                 response = self.client.complete(system, context.text,
                                                 max_output_tokens=agent_budget.max_output_tokens)
@@ -101,16 +106,13 @@ class BaseAgent:
                 tokens_in = max(tokens_in, response.tokens_in)
                 response_tokens_out = response.tokens_out
             except (ProviderError, ResponseParseError) as exc:
-                # Degrade loudly rather than inventing a result.
+                # Never substitute deterministic prose or findings when a real
+                # provider call fails; mark this agent degraded and preserve the
+                # failure for the run report.
                 status = AgentStatus.DEGRADED
-                notes.append(f"provider unavailable/unparseable, fell back to deterministic engine: {exc}")
-                engine = "heuristic"
-                payload = self.deterministic(brief, draft, iteration, peer_reports or [],
-                                             open_findings=open_findings)
-        else:
-            engine = "offline-heuristic"
-            payload = self.deterministic(brief, draft, iteration, peer_reports or [],
-                                         open_findings=open_findings)
+                notes.append(f"LLM call failed: {exc}")
+                engine = f"{self.client.engine_name}:error"
+                payload = {"_error": str(exc), "sections": [], "findings": []}
 
         report = self.compose(
             payload=payload,
@@ -130,7 +132,7 @@ class BaseAgent:
     def deterministic(self, brief: Brief, draft: Draft, iteration: int,
                       peer_reports: List[AgentReport],
                       open_findings: Optional[List[Finding]] = None) -> Dict[str, Any]:
-        """Produce the same payload an LLM would, using rule-based analysis."""
+        """Expose rule-based test logic; this is never a production LLM fallback."""
         raise NotImplementedError
 
     def compose(self, *, payload: Dict[str, Any], brief: Brief, draft: Draft, iteration: int,

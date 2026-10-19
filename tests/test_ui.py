@@ -254,6 +254,16 @@ def test_route_back_is_terminal_and_carries_the_issues():
     assert "Routed back" in tracker.headline()
 
 
+def test_tracker_distinguishes_missing_provider_from_a_bad_brief():
+    tracker = TrackerState()
+    tracker.consume(_event(EventType.GATE_ROUTE_BACK, message="Dahl key required",
+                           issues=[{"severity": "blocker", "category": "provider",
+                                    "claim": "Dahl key required"}]))
+
+    assert "No draft generated" in tracker.headline()
+    assert "input gate" not in tracker.headline()
+
+
 def test_tracker_resets_cleanly_between_runs():
     tracker = TrackerState()
     tracker.consume(_event(EventType.RUN_START))
@@ -267,7 +277,7 @@ def test_tracker_resets_cleanly_between_runs():
     assert tracker.final_score == 0.0
 
 
-def test_tracker_is_driven_by_a_real_orchestrator_run(tmp_path):
+def test_tracker_is_driven_by_a_real_orchestrator_run(tmp_path, model_client):
     """Integration: replay the events a genuine run emits and check the tracker tracks."""
     from articlegen.models import Brief
     from articlegen.orchestrator import Orchestrator, OrchestratorConfig
@@ -284,9 +294,9 @@ def test_tracker_is_driven_by_a_real_orchestrator_run(tmp_path):
         "max_iterations": 2,
         "workspace": str(tmp_path / "runs"),
         "changelog_path": str(tmp_path / "change_log.md"),
-        "provider": "offline",
+        "provider": "dahl",
     })
-    result = Orchestrator(config, events=events).run(brief)
+    result = Orchestrator(config, client=model_client, events=events).run(brief)
 
     assert tracker.status == "done"
     assert tracker.result_status == result.status
@@ -331,6 +341,8 @@ def _fill_and_validate(test, example):
             widget.set_value(test.session_state["_ws"])
         elif widget.label == "Change log" and test.session_state.get("_cl"):
             widget.set_value(test.session_state["_cl"])
+        elif widget.label == "Dahl API Key":
+            widget.set_value("test-dahl-key")
 
     for widget in test.text_input:
         if widget.label == "Task ID":
@@ -394,6 +406,18 @@ def test_app_exposes_the_run_settings(app_test):
 
 
 @requires_streamlit
+def test_sidebar_exposes_dahl_key_and_model_fields():
+    test = AppTest.from_file(APP_PATH, default_timeout=120)
+    test.run()
+
+    labels = [widget.label for widget in test.sidebar.text_input]
+    assert "Dahl API Key" in labels
+    assert "Dahl Model" in labels
+    assert test.sidebar.selectbox[0].value == "dahl"
+    assert any("Dahl API key is required" in error.value for error in test.error)
+
+
+@requires_streamlit
 def test_run_button_starts_disabled_until_a_brief_is_validated(app_test):
     app_test.run()
     run_buttons = [b for b in app_test.button if "Run orchestrated" in b.label]
@@ -418,8 +442,15 @@ def test_validating_the_bundled_example_passes_the_gate(app_test):
 
 
 @requires_streamlit
-def test_full_run_through_the_ui_produces_a_downloadable_draft(tmp_path):
-    """Drives app.py end to end: fill -> validate -> run -> assert draft + download."""
+def test_full_run_through_the_ui_produces_a_downloadable_draft(tmp_path, monkeypatch, model_client):
+    """Drives app.py end to end with a fake model provider, never offline prose."""
+    client_options = {}
+
+    def fake_resolve_client(**kwargs):
+        client_options.update(kwargs)
+        return model_client
+
+    monkeypatch.setattr("articlegen.llm.resolve_client", fake_resolve_client)
     test = AppTest.from_file(APP_PATH, default_timeout=300)
     test.run()
     assert not test.exception
@@ -446,6 +477,10 @@ def test_full_run_through_the_ui_produces_a_downloadable_draft(tmp_path):
     test.run()
 
     assert not test.exception, test.exception
+    assert client_options["provider"] == "dahl"
+    assert client_options["api_key"] == "test-dahl-key"
+    assert client_options["model"]
+    assert "test-dahl-key" not in (tmp_path / "change_log.md").read_text()
     tracker = test.session_state["tracker"]
     assert tracker.status == "done"
     assert tracker.iterations
@@ -783,14 +818,16 @@ def _count_chart_specs(test):
 
 
 @requires_streamlit
-def test_score_and_component_charts_actually_render(tmp_path):
-    """The Scores tab must emit both Vega-Lite charts, not silently skip them.
-
-    render_score_chart returns early with st.info when there are fewer than two
-    points, so a regression that starves it of data would render no chart at all
-    while every other assertion still passed.
-    """
+def test_score_and_component_charts_actually_render(tmp_path, monkeypatch, model_client):
+    """The Scores tab must emit both charts after a fake-model run."""
+    monkeypatch.setattr("articlegen.llm.resolve_client", lambda **_kwargs: model_client)
     test = AppTest.from_file(APP_PATH, default_timeout=300)
+    test.run()
+    for widget in test.sidebar.slider:
+        if widget.label == "Max iterations":
+            widget.set_value(2)
+        elif widget.label == "Target score":
+            widget.set_value(0.99)
     test.run()
 
     with open(os.path.join(REPO_ROOT, "examples", "brief_example.json"),

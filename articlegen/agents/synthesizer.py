@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from ..models import AgentReport, AgentStatus, Brief, Draft, Finding, Section, Severity
 from .base import BaseAgent
 from .reviewer import FILLER_PATTERNS
-from .writer import apply_mechanical_polish, scaffold_body
+from .writer import apply_mechanical_polish
 
 CONTRACTIONS = {
     "don't": "do not", "doesn't": "does not", "didn't": "did not",
@@ -119,7 +119,7 @@ class Synthesizer(BaseAgent):
                             continue
                         working[section_id] = Section(
                             id=section_id, title=source.title, purpose=source.purpose,
-                            body=scaffold_body(source, brief), word_target=source.word_target,
+                            body="", word_target=source.word_target,
                         )
                         applied.append(f"architect:restored {section_id}")
                 elif kind == "remove_sections":
@@ -140,9 +140,9 @@ class Synthesizer(BaseAgent):
             if section_id not in working:
                 working[section_id] = Section(
                     id=section_id, title=source.title, purpose=source.purpose,
-                    body=scaffold_body(source, brief), word_target=source.word_target,
+                    body="", word_target=source.word_target,
                 )
-                applied.append(f"synthesizer:restored {section_id} from outline")
+                applied.append(f"synthesizer:restored empty outline section {section_id}")
 
         # -- 4. Readability and mechanical correctness fixes ------------
         for agent_id in ("reviewer", "tester"):

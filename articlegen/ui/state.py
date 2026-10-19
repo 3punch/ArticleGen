@@ -306,6 +306,8 @@ class TrackerState:
 
     def headline(self) -> str:
         if self.status == "route_back":
+            if any(issue.get("category") == "provider" for issue in self.route_back_issues):
+                return f"⛔ No draft generated — {self.stop_reason}"
             return f"⛔ Routed back at the input gate — {self.stop_reason}"
         if self.status == "done":
             return (f"✅ {self.result_status} — score {self.final_score:.4f} "

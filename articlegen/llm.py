@@ -1,20 +1,17 @@
 """LLM provider abstraction.
 
-Four engines behind one interface:
+Three engines behind one interface:
 
 * ``AnthropicClient`` / ``OpenAIClient`` / ``DahlClient`` - real calls over HTTPS,
   standard library only (``urllib``), so the package keeps zero runtime dependencies.
-* ``OfflineClient`` - the default when no API key is present. It reports
-  ``available = False`` and the agents fall back to their deterministic engines.
+* ``OfflineClient`` - a sentinel used when no provider key is configured. The
+  orchestrator stops the run; it is never an article-generation engine.
 
 ``DahlClient`` talks to the Dahl inference API
 (``https://inference.dahl.global/v1``), which is OpenAI-compatible chat
 completions with Bearer authentication.
 
-**Verification status:** the offline path is exercised by the test suite and by a
-full end-to-end run. The network clients are *not* callable from this sandbox
-(egress is limited to GitHub/PyPI/npm), so their request shape is implemented but
-unverified against the live APIs.
+The request shape is verified against stubbed HTTP responses in the test suite.
 """
 
 from __future__ import annotations
@@ -56,14 +53,14 @@ class LLMClient:
 
 
 class OfflineClient(LLMClient):
-    """Signals that agents must use their deterministic engines."""
+    """Explicit offline harness for tests. Not used as implicit ``auto`` fallback."""
 
     engine_name = "offline"
     available = False
 
     def complete(self, system: str, user: str, *, max_output_tokens: int = 1000) -> LLMResponse:
         raise ProviderError(
-            "no LLM provider configured; agents will use their deterministic engines"
+            "no LLM provider configured; article generation requires a Dahl/Anthropic/OpenAI key"
         )
 
 
@@ -178,31 +175,79 @@ class DahlClient(OpenAIClient):
         super().__init__(api_key, model, base_url, timeout)
 
 
-def resolve_client(provider: str = "auto", model: Optional[str] = None) -> LLMClient:
-    """Pick an engine from explicit choice or environment.
+def resolve_client(provider: str = "auto", model: Optional[str] = None,
+                   api_key: Optional[str] = None, base_url: Optional[str] = None,
+                   dahl_api_key: Optional[str] = None, dahl_model: Optional[str] = None,
+                   dahl_base_url: Optional[str] = None) -> LLMClient:
+    """Resolve a provider from explicit settings first, then environment.
 
-    ``auto`` prefers Anthropic, then OpenAI, then Dahl, then offline. An explicitly
-    requested provider whose key is missing returns an unavailable client rather
-    than raising, so a CI run degrades to deterministic output instead of failing.
-
-    Dahl reads ``DAHL_API_KEY`` and optionally ``DAHL_MODEL`` and ``DAHL_BASE_URL``
-    (defaults: ``zai-org/GLM-5.3-Flash`` and ``https://inference.dahl.global/v1``).
+    An empty UI field does not mask a configured environment variable. In ``auto``
+    mode, a Dahl key explicitly entered in the UI takes priority; otherwise the
+    environment priority is Anthropic, OpenAI, then Dahl. Missing credentials return
+    an unavailable ``OfflineClient`` sentinel so the orchestrator can explain the
+    problem without generating a fallback article.
     """
-    provider = (provider or "auto").lower()
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    dahl_key = os.environ.get("DAHL_API_KEY", "").strip()
+    provider = (provider or "auto").strip().lower()
+    explicit_key = (api_key or "").strip() or None
+    explicit_model = (model or "").strip() or None
+    explicit_base = (base_url or "").strip() or None
+    explicit_dahl_key = (dahl_api_key or "").strip() or None
+    explicit_dahl_model = (dahl_model or "").strip() or None
+    explicit_dahl_base = (dahl_base_url or "").strip() or None
 
-    if provider in ("auto", "anthropic") and anthropic_key:
-        return AnthropicClient(anthropic_key, model or "claude-sonnet-4-5")
-    if provider in ("auto", "openai") and openai_key:
-        return OpenAIClient(openai_key, model or "gpt-4o-mini")
-    if provider in ("auto", "dahl") and dahl_key:
-        dahl_model = (model or os.environ.get("DAHL_MODEL", "").strip()
-                      or DahlClient.DEFAULT_MODEL)
-        dahl_base = (os.environ.get("DAHL_BASE_URL", "").strip()
-                     or DahlClient.DEFAULT_BASE_URL)
-        return DahlClient(dahl_key, dahl_model, dahl_base)
+    # A provider-specific key in the UI wins over generic environment auto-detect.
+    if provider == "dahl" or (provider == "auto" and explicit_dahl_key):
+        key = explicit_dahl_key or (explicit_key if provider == "dahl" else None) \
+            or os.environ.get("DAHL_API_KEY", "").strip()
+        resolved_model = (
+            (explicit_model if provider == "dahl" else None)
+            or explicit_dahl_model
+            or os.environ.get("DAHL_MODEL", "").strip()
+            or DahlClient.DEFAULT_MODEL
+        )
+        resolved_base = (
+            explicit_dahl_base
+            or (explicit_base if provider == "dahl" else None)
+            or os.environ.get("DAHL_BASE_URL", "").strip()
+            or DahlClient.DEFAULT_BASE_URL
+        )
+        return DahlClient(key, resolved_model, resolved_base) if key else OfflineClient()
+
+    if provider in ("auto", "anthropic"):
+        key = explicit_key or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if key:
+            return AnthropicClient(
+                key, explicit_model or "claude-sonnet-4-5",
+                explicit_base or "https://api.anthropic.com/v1",
+            )
+        if provider == "anthropic":
+            return OfflineClient()
+
+    if provider in ("auto", "openai"):
+        key = explicit_key or os.environ.get("OPENAI_API_KEY", "").strip()
+        if key:
+            return OpenAIClient(
+                key, explicit_model or "gpt-4o-mini",
+                explicit_base or "https://api.openai.com/v1",
+            )
+        if provider == "openai":
+            return OfflineClient()
+
+    if provider in ("auto", "dahl"):
+        key = explicit_dahl_key or explicit_key or os.environ.get("DAHL_API_KEY", "").strip()
+        if key:
+            return DahlClient(
+                key,
+                explicit_model or explicit_dahl_model
+                or os.environ.get("DAHL_MODEL", "").strip()
+                or DahlClient.DEFAULT_MODEL,
+                explicit_dahl_base or explicit_base
+                or os.environ.get("DAHL_BASE_URL", "").strip()
+                or DahlClient.DEFAULT_BASE_URL,
+            )
+
+    # ``offline`` is supported only as an internal testing sentinel. It has no
+    # drafting implementation, and the orchestrator refuses to start a run with it.
     return OfflineClient()
 
 

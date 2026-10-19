@@ -151,9 +151,45 @@ def test_resolve_client_auto_prefers_anthropic_then_openai_then_dahl(
     assert resolve_client("auto").engine_name == "offline"
 
 
+def test_resolve_client_uses_ui_dahl_key_and_model(clear_provider_env, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "another-provider-key")
+
+    client = resolve_client(
+        "dahl", api_key="ui-dahl-key", model="ui/model-id",
+        base_url="https://ui.example/v1",
+    )
+
+    assert isinstance(client, DahlClient)
+    assert client.api_key == "ui-dahl-key"
+    assert client.model == "ui/model-id"
+    assert client.base_url == "https://ui.example/v1"
+
+
+def test_auto_prefers_dahl_credentials_explicitly_entered_in_ui(clear_provider_env, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "environment-anthropic-key")
+
+    client = resolve_client("auto", dahl_api_key="ui-dahl-key", dahl_model="ui/model")
+
+    assert isinstance(client, DahlClient)
+    assert client.api_key == "ui-dahl-key"
+    assert client.model == "ui/model"
+
+
+def test_empty_ui_dahl_fields_fall_back_to_environment(clear_provider_env, monkeypatch):
+    monkeypatch.setenv("DAHL_API_KEY", "environment-key")
+    monkeypatch.setenv("DAHL_MODEL", "environment/model")
+
+    client = resolve_client("dahl", api_key="", dahl_api_key="", dahl_model="")
+
+    assert isinstance(client, DahlClient)
+    assert client.api_key == "environment-key"
+    assert client.model == "environment/model"
+
+
 def test_resolve_client_dahl_honours_model_and_base_url_env(
     clear_provider_env, monkeypatch
 ):
+
     monkeypatch.setenv("DAHL_API_KEY", "k")
     monkeypatch.setenv("DAHL_MODEL", "env/model-id")
     monkeypatch.setenv("DAHL_BASE_URL", "https://proxy.internal/v1")

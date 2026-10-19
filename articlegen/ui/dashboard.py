@@ -20,6 +20,7 @@ import streamlit as st
 
 from articlegen.changelog import read_jsonl
 from articlegen.events import EventBus
+from articlegen.llm import DahlClient, resolve_client
 from articlegen.orchestrator import Orchestrator, OrchestratorConfig
 from articlegen.cli import TEMPLATE_BRIEF
 from articlegen.ui import builder, render
@@ -83,9 +84,8 @@ with st.sidebar:
     score_target = st.slider("Target score", 0.50, 0.99, 0.85, 0.01)
     cap = st.number_input("Context hard cap (tokens)", 500, 20000, 6000, 100)
     provider = st.selectbox(
-        "Provider", ["auto", "anthropic", "openai", "dahl", "offline"],
-        help=("Real calls need ANTHROPIC_API_KEY, OPENAI_API_KEY or DAHL_API_KEY. "
-              "With no API key set, agents use deterministic engines."),
+        "Provider", ["dahl", "auto", "anthropic", "openai"],
+        help="Article generation requires a Dahl, Anthropic or OpenAI API key. Offline templating is disabled.",
     )
     st.session_state.score_target = score_target
 
@@ -94,6 +94,43 @@ with st.sidebar:
     changelog_path = st.text_input("Change log", st.session_state.changelog_path)
     st.session_state.workspace = workspace
     st.session_state.changelog_path = changelog_path
+
+    st.subheader("LLM credentials — Dahl")
+    st.caption("Enter your Dahl key and model here (or set DAHL_API_KEY env var). Stored only in session memory.")
+    dahl_api_key = st.text_input(
+        "Dahl API Key",
+        value=st.session_state.get("dahl_api_key", os.environ.get("DAHL_API_KEY", "")),
+        type="password",
+        help="Bearer token for https://inference.dahl.global/v1 — leave empty to use env var DAHL_API_KEY",
+    )
+    dahl_model = st.text_input(
+        "Dahl Model",
+        value=st.session_state.get("dahl_model", os.environ.get("DAHL_MODEL", DahlClient.DEFAULT_MODEL)),
+        help="Exact model ID from Dahl /v1/models, e.g. zai-org/GLM-5.3-Flash",
+    )
+    dahl_base_url = st.text_input(
+        "Dahl Base URL",
+        value=st.session_state.get("dahl_base_url", os.environ.get("DAHL_BASE_URL", DahlClient.DEFAULT_BASE_URL)),
+        help="Override only if using a custom Dahl endpoint",
+    )
+    # Persist in session so the run block can read them without re-entering
+    st.session_state["dahl_api_key"] = dahl_api_key
+    st.session_state["dahl_model"] = dahl_model
+    st.session_state["dahl_base_url"] = dahl_base_url
+
+    # Validation feedback before run
+    _effective_dahl_key = (dahl_api_key or os.environ.get("DAHL_API_KEY", "")).strip()
+    _effective_anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    _effective_openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    _has_any_key = bool(_effective_dahl_key or _effective_anthropic_key or _effective_openai_key)
+    if provider == "dahl" and not _effective_dahl_key:
+        st.error("Dahl API key is required. Enter it above or set DAHL_API_KEY in the environment.")
+    elif provider == "anthropic" and not _effective_anthropic_key:
+        st.error("Anthropic API key is required for this provider (set ANTHROPIC_API_KEY).")
+    elif provider == "openai" and not _effective_openai_key:
+        st.error("OpenAI API key is required for this provider (set OPENAI_API_KEY).")
+    elif provider == "auto" and not _has_any_key:
+        st.error("No LLM key found — enter a Dahl key above or set DAHL_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY, then re-run.")
 
     st.divider()
     st.caption(
@@ -214,8 +251,21 @@ with tab_brief:
     )
     form_drifted = validated_brief is not None and current_brief != validated_brief
 
+    _can_run_llm = True
+    _effective_dahl_key = (st.session_state.get("dahl_api_key", "") or os.environ.get("DAHL_API_KEY", "")).strip()
+    _effective_anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    _effective_openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if provider == "dahl":
+        _can_run_llm = bool(_effective_dahl_key)
+    elif provider == "anthropic":
+        _can_run_llm = bool(_effective_anthropic_key)
+    elif provider == "openai":
+        _can_run_llm = bool(_effective_openai_key)
+    elif provider == "auto":
+        _can_run_llm = bool(_effective_dahl_key or _effective_anthropic_key or _effective_openai_key)
+
     can_run = (validated_brief is not None and validated_gate is not None
-               and validated_gate.ok and not form_drifted)
+               and validated_gate.ok and not form_drifted and _can_run_llm)
 
     st.markdown("### Run the pipeline")
     if validated_brief is None:
@@ -224,6 +274,8 @@ with tab_brief:
         st.warning("The form has changed since you validated it. The pipeline runs the "
                    "**validated** brief, not what is on screen — re-validate to run these "
                    "edits.")
+    elif not _can_run_llm:
+        st.error("Enter the selected provider's API key before running. Offline article generation is disabled.")
     elif not can_run:
         st.error("The decision gate routed this brief back. Resolve the blockers above "
                  "before running.")
@@ -262,6 +314,16 @@ with tab_brief:
             "changelog_path": changelog_path,
             "token_budget": {"context_hard_cap": int(cap)},
         })
+        # Build LLM client from sidebar inputs (takes precedence over env vars)
+        llm_client = resolve_client(
+            provider=provider,
+            model=st.session_state.get("dahl_model", "") if provider == "dahl" else None,
+            api_key=st.session_state.get("dahl_api_key", "") if provider == "dahl" else None,
+            base_url=st.session_state.get("dahl_base_url", "") if provider == "dahl" else None,
+            dahl_api_key=st.session_state.get("dahl_api_key", ""),
+            dahl_model=st.session_state.get("dahl_model", ""),
+            dahl_base_url=st.session_state.get("dahl_base_url", ""),
+        )
         events = EventBus()
         events.subscribe(tracker.consume)
         events.subscribe(lambda e: render.render_tracker(live_container, tracker, score_target))
@@ -272,7 +334,7 @@ with tab_brief:
         st.session_state["event_bus"] = events
 
         with st.spinner("Orchestrator running…"):
-            orchestrator = Orchestrator(config, events=events)
+            orchestrator = Orchestrator(config, client=llm_client, events=events)
             result = orchestrator.run(brief)
 
         st.session_state["draft_markdown"] = (
@@ -289,8 +351,11 @@ with tab_brief:
         render.render_tracker(live_container, tracker, score_target)
         if tracker.status == "route_back":
             render.render_route_back(route_back_container, tracker)
-        st.success(f"Run finished — {result.status}. Switch to the "
-                   f"**Execution**, **Scores** and **Draft** tabs for detail.")
+        if result.status == "PASS":
+            st.success(f"Run finished — {result.status}. Switch to the "
+                       f"**Execution**, **Scores** and **Draft** tabs for detail.")
+        else:
+            st.error(f"Run finished — {result.status}: {result.stop_reason}")
 
 # -- Tab 2: execution -----------------------------------------------------
 
