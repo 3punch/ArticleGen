@@ -92,7 +92,7 @@ class Orchestrator:
             "mode": brief.mode.value,
             "target_words": brief.target_words,
             "sections": len(brief.sections),
-            "engine": self.client.name() if self.client.available else "offline-heuristic",
+            "engine": self.client.name() if self.client.available else "not-configured",
             "max_iterations": self.config.max_iterations,
             "score_target": self.config.score_target,
             "context_hard_cap": self.config.budget.context_hard_cap,
@@ -105,7 +105,7 @@ class Orchestrator:
                          max_iterations=self.config.max_iterations,
                          score_target=self.config.score_target,
                          engine=self.client.name() if self.client.available
-                         else "offline-heuristic")
+                         else "not-configured")
 
         gate = verify_brief(brief)
         if gate.routed_back:
@@ -129,6 +129,34 @@ class Orchestrator:
         self.events.emit(EventType.GATE_PASS, task_id=brief.task_id,
                          message="input verification passed; entering agent loop",
                          issues=len(gate.issues))
+
+        # Generation is LLM-only. A missing key (including explicit offline mode)
+        # must stop before the Writer can produce any draft text.
+        if not self.client.available:
+            reason = (
+                f"LLM provider '{self.config.provider}' is not configured. "
+                "Article generation has no offline fallback; enter a Dahl API key "
+                "and model in the UI sidebar or set DAHL_API_KEY / DAHL_MODEL, "
+                "then run again."
+            )
+            self.changelog.log_event("RUN_ABORTED", brief.task_id, {
+                "reason": reason,
+                "provider": self.config.provider,
+                "blockers": 0,
+                "tokens_spent": 0,
+            })
+            self.events.emit(EventType.GATE_ROUTE_BACK, task_id=brief.task_id,
+                             message=reason, blockers=0,
+                             issues=[{"severity": "blocker", "category": "provider",
+                                      "section": "run settings", "claim": reason,
+                                      "action": "Enter a valid LLM API key and model, then retry."}])
+            self.events.emit(EventType.RUN_END, task_id=brief.task_id, status="ROUTE_BACK",
+                             message=reason, final_score=0.0, iterations=0,
+                             tokens_total=0)
+            return RunResult(
+                task_id=brief.task_id, status="ROUTE_BACK", gate=gate,
+                workspace="", stop_reason=reason,
+            )
 
         # Only create a per-task directory after the gate has validated task_id.
         # Otherwise an invalid id such as "../outside" could escape the workspace

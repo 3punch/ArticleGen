@@ -10,7 +10,7 @@ def _config(tmp_path, **overrides):
         "score_target": 0.85,
         "workspace": str(tmp_path / "runs"),
         "changelog_path": str(tmp_path / "change_log.md"),
-        "provider": "offline",
+        "provider": "dahl",
     }
     data.update(overrides)
     return OrchestratorConfig.from_dict(data)
@@ -27,6 +27,18 @@ def test_invalid_brief_is_routed_back_without_running_agents(tmp_path, valid_bri
     log = (tmp_path / "change_log.md").read_text()
     assert "GATE ROUTE-BACK" in log
     assert "ROUTE_BACK" in log
+
+
+def test_run_without_an_llm_never_creates_an_offline_article(tmp_path, valid_brief):
+    from articlegen.llm import OfflineClient
+
+    result = Orchestrator(_config(tmp_path), client=OfflineClient()).run(valid_brief)
+
+    assert result.status == "ROUTE_BACK"
+    assert result.iterations == []
+    assert result.final_draft is None
+    assert "no offline fallback" in result.stop_reason.lower()
+    assert not (tmp_path / "runs" / valid_brief.task_id).exists()
 
 
 def test_invalid_task_id_cannot_create_a_path_outside_the_workspace(tmp_path, valid_brief):
@@ -48,12 +60,14 @@ def test_final_status_respects_the_configured_score_target():
 
 
 def test_run_does_not_pass_when_it_misses_a_higher_configured_target(
-    tmp_path, example_brief_dict
+    tmp_path, example_brief_dict, model_client
 ):
     brief = Brief.from_dict(example_brief_dict)
-    result = Orchestrator(_config(tmp_path, max_iterations=2, score_target=0.99)).run(brief)
+    result = Orchestrator(
+        _config(tmp_path, max_iterations=2, score_target=1.0), client=model_client
+    ).run(brief)
 
-    assert 0.85 <= result.final_score < 0.99
+    assert 0.85 <= result.final_score < 1.0
     assert result.status == "NEEDS_HUMAN"
 
 
@@ -66,8 +80,8 @@ def test_seeded_section_prose_is_preserved_in_the_initial_draft(valid_brief):
     assert all(not section.body for section in draft.sections[1:])
 
 
-def test_full_loop_runs_offline_and_produces_a_draft(tmp_path, valid_brief):
-    orchestrator = Orchestrator(_config(tmp_path))
+def test_full_loop_uses_configured_model_and_produces_a_draft(tmp_path, valid_brief, model_client):
+    orchestrator = Orchestrator(_config(tmp_path), client=model_client)
     result = orchestrator.run(valid_brief)
 
     assert result.status in ("PASS", "NEEDS_HUMAN")
@@ -76,10 +90,12 @@ def test_full_loop_runs_offline_and_produces_a_draft(tmp_path, valid_brief):
     assert all(s.body.strip() for s in result.final_draft.sections)
     assert result.final_draft.word_count > 0
     assert (tmp_path / "runs" / valid_brief.task_id / "master_draft.md").exists()
+    assert all(report.engine.startswith("test-llm")
+               for report in result.iterations[0].reports)
 
 
-def test_every_iteration_is_logged(tmp_path, valid_brief):
-    orchestrator = Orchestrator(_config(tmp_path, max_iterations=3))
+def test_every_iteration_is_logged(tmp_path, valid_brief, model_client):
+    orchestrator = Orchestrator(_config(tmp_path, max_iterations=3), client=model_client)
     result = orchestrator.run(valid_brief)
 
     entries = read_jsonl(str(tmp_path / "change_log.jsonl"))
@@ -90,8 +106,10 @@ def test_every_iteration_is_logged(tmp_path, valid_brief):
     assert result.stop_reason
 
 
-def test_score_does_not_regress_after_the_first_iteration(tmp_path, valid_brief):
-    orchestrator = Orchestrator(_config(tmp_path, max_iterations=3))
+def test_score_does_not_regress_after_the_first_iteration(tmp_path, valid_brief, model_client):
+    orchestrator = Orchestrator(
+        _config(tmp_path, max_iterations=3, score_target=1.0), client=model_client
+    )
     result = orchestrator.run(valid_brief)
     scores = [r.score for r in result.iterations]
     assert len(scores) >= 2
@@ -100,9 +118,9 @@ def test_score_does_not_regress_after_the_first_iteration(tmp_path, valid_brief)
     assert all(0.0 <= s <= 1.0 for s in scores)
 
 
-def test_context_packets_respect_the_hard_cap(tmp_path, valid_brief):
+def test_context_packets_respect_the_hard_cap(tmp_path, valid_brief, model_client):
     config = _config(tmp_path, max_iterations=2)
-    orchestrator = Orchestrator(config)
+    orchestrator = Orchestrator(config, client=model_client)
     orchestrator.run(valid_brief)
 
     from articlegen.tokens import count_tokens
@@ -113,14 +131,14 @@ def test_context_packets_respect_the_hard_cap(tmp_path, valid_brief):
         assert count_tokens(path.read_text()) <= config.budget.context_hard_cap + 60, path.name
 
 
-def test_run_is_deterministic(tmp_path, valid_brief):
-    first = Orchestrator(_config(tmp_path / "a")).run(valid_brief)
-    second = Orchestrator(_config(tmp_path / "b")).run(valid_brief)
+def test_run_is_deterministic(tmp_path, valid_brief, model_client):
+    first = Orchestrator(_config(tmp_path / "a"), client=model_client).run(valid_brief)
+    second = Orchestrator(_config(tmp_path / "b"), client=model_client).run(valid_brief)
     assert [round(r.score, 4) for r in first.iterations] == [round(r.score, 4) for r in second.iterations]
     assert first.tokens_total == second.tokens_total
 
 
-def test_open_findings_are_capped(tmp_path):
+def test_open_findings_are_capped(tmp_path, model_client):
     brief = Brief(
         task_id="many-findings",
         title="A Brief Designed To Produce Many Findings",
@@ -133,7 +151,7 @@ def test_open_findings_are_capped(tmp_path):
             for index in range(10)
         ],
     )
-    orchestrator = Orchestrator(_config(tmp_path, max_iterations=2))
+    orchestrator = Orchestrator(_config(tmp_path, max_iterations=2), client=model_client)
     orchestrator.run(brief)
 
     from articlegen.memory import MemoryStore

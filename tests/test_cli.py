@@ -45,38 +45,30 @@ def test_verify_reports_malformed_brief_json_without_traceback(
     assert "Traceback" not in error
 
 
-def test_run_cli_creates_a_complete_article_offline(tmp_path, capsys):
+def test_run_cli_refuses_to_generate_without_a_model(tmp_path, capsys, monkeypatch):
     workspace = tmp_path / "runs"
     changelog = tmp_path / "change_log.md"
     result_path = tmp_path / "result.json"
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DAHL_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
 
     exit_code = main([
         "run", str(EXAMPLE_BRIEF),
-        "--provider", "offline",
+        "--provider", "dahl",
         "--iterations", "2",
-        "--target", "0.85",
         "--workspace", str(workspace),
         "--changelog", str(changelog),
         "--json", str(result_path),
     ])
 
     output = capsys.readouterr().out
-    assert exit_code == 0, output
-    assert "status    : PASS" in output
+    assert exit_code == 1, output
+    assert "status    : ROUTE_BACK" in output
+    assert "no offline fallback" in output.lower()
+    assert "draft     : not created" in output
 
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    draft = result["draft"]
-    markdown_path = workspace / "demo-article" / "master_draft.md"
-    markdown = markdown_path.read_text(encoding="utf-8")
-
-    assert result["status"] == "PASS"
-    assert result["gate"]["ok"] is True
-    assert draft["title"] in markdown
-    assert [section["id"] for section in draft["sections"]] == [
-        "introduction", "decision-gate", "agent-roles", "token-budget",
-    ]
-    assert all(section["body"].strip() for section in draft["sections"])
-    assert 600 <= sum(len(section["body"].split()) for section in draft["sections"]) <= 1500
-    for marker in ("todo", "tbd", "fixme", "lorem ipsum", "placeholder"):
-        assert marker not in markdown.lower()
-    assert changelog.exists()
+    assert result["status"] == "ROUTE_BACK"
+    assert result["iterations"] == []
+    assert result["draft"] is None
+    assert not (workspace / "demo-article").exists()

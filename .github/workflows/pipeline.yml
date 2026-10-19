@@ -15,7 +15,7 @@ on:
         required: false
         default: "4"
       provider:
-        description: "LLM provider (auto|anthropic|openai|dahl|offline)"
+        description: "LLM provider (auto|anthropic|openai|dahl)"
         required: false
         default: "auto"
 
@@ -157,11 +157,16 @@ jobs:
 
       - name: Run the pipeline
         env:
-          # Free-tier default: no key -> deterministic engine. Set a secret to use a model.
+          # Model runs are skipped unless at least one provider key is configured.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DAHL_API_KEY: ${{ secrets.DAHL_API_KEY }}
         run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${DAHL_API_KEY:-}" ]; then
+            echo "No provider key configured; skipping generation (offline article generation is disabled)."
+            echo "No model run was requested because no provider secret is configured." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           BRIEF="${{ github.event.inputs.brief || 'examples/brief_example.json' }}"
           ITERATIONS="${{ github.event.inputs.iterations || '4' }}"
           PROVIDER="${{ github.event.inputs.provider || 'auto' }}"

@@ -124,11 +124,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"score     : {result.final_score:.4f} (target {config.score_target})")
     print(f"iterations: {len(result.iterations)}")
     print(f"tokens    : {result.tokens_total} (ceiling {config.budget.run_token_ceiling})")
-    print(f"workspace : {result.workspace or '(not created; brief failed the input gate)'}")
+    print(f"workspace : {result.workspace or '(not created; run stopped before generation)'}")
     if result.final_draft is not None:
         print(f"draft     : {os.path.join(result.workspace, 'master_draft.md')}")
     else:
-        print("draft     : not created (brief failed the input gate)")
+        print(f"draft     : not created ({result.stop_reason})")
     print(f"log       : {config.changelog_path}")
 
     for record in result.iterations:
@@ -283,7 +283,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--iterations", type=int, default=None)
     run.add_argument("--target", type=float, default=None, help="quality score target")
     run.add_argument("--provider", default=None,
-                     choices=["auto", "anthropic", "openai", "dahl", "offline"])
+                     choices=["auto", "anthropic", "openai", "dahl"])
     run.add_argument("--model", default=None,
                      help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     run.add_argument("--workspace", default=None)
@@ -313,7 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--workspace", default=None)
     demo.add_argument("--changelog", default=None)
     demo.add_argument("--provider", default=None,
-                      choices=["auto", "anthropic", "openai", "dahl", "offline"])
+                      choices=["auto", "anthropic", "openai", "dahl"])
     demo.add_argument("--model", default=None,
                       help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     demo.add_argument("--config", default=None)

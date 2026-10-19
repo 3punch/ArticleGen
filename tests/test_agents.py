@@ -2,7 +2,6 @@ import pytest
 
 from articlegen.agents import build_agents
 from articlegen.agents.synthesizer import _apply_text_fixes, build_draft
-from articlegen.agents.writer import scaffold_body
 from articlegen.llm import OfflineClient, coerce_findings, parse_json, ResponseParseError
 from articlegen.models import AgentStatus, Draft, Section, Severity
 from articlegen.tokens import TokenBudget
@@ -13,29 +12,18 @@ def agents():
     return {a.agent_id: a for a in build_agents(OfflineClient(), TokenBudget.default())}
 
 
-def test_scaffold_body_reaches_the_word_target(valid_brief):
-    section = valid_brief.sections[1]
-    body = scaffold_body(section, valid_brief)
-    assert len(body.split()) >= section.word_target
-    assert len(body.split()) <= section.word_target * 1.6
+def test_writer_offline_mode_never_generates_article_content(agents, valid_brief):
+    from articlegen.memory import AssembledContext
 
-
-def test_scaffold_body_is_deterministic(valid_brief):
-    section = valid_brief.sections[0]
-    assert scaffold_body(section, valid_brief) == scaffold_body(section, valid_brief)
-
-
-def test_scaffold_body_contains_no_placeholder_markers(valid_brief):
-    body = scaffold_body(valid_brief.sections[0], valid_brief).lower()
-    for marker in ("todo", "tbd", "fixme", "lorem ipsum", "placeholder"):
-        assert marker not in body
-
-
-def test_writer_fills_empty_sections(agents, valid_brief):
     draft = Draft.from_brief(valid_brief)
-    payload = agents["writer"].deterministic(valid_brief, draft, 1, [])
-    assert len(payload["sections"]) == len(valid_brief.sections)
-    assert all(item["body"].strip() for item in payload["sections"])
+    writer = agents["writer"]
+    payload = writer.deterministic(valid_brief, draft, 1, [])
+    report = writer.run(AssembledContext(text="context", tokens=1), valid_brief, draft, 1)
+
+    assert payload["sections"] == []
+    assert report.payload["sections"] == []
+    assert report.status == AgentStatus.DEGRADED
+    assert any("no content was generated" in note for note in report.notes)
 
 
 def test_writer_skips_sections_that_are_already_long_enough(agents, valid_brief):
@@ -139,7 +127,6 @@ def test_architect_detects_order_divergence(agents, valid_brief):
 
 def test_synthesizer_merges_writer_output_into_a_new_draft(agents, valid_brief):
     draft = Draft.from_brief(valid_brief)
-    writer = agents["writer"]
     tester = agents["tester"]
     reviewer = agents["reviewer"]
     architect = agents["architect"]
@@ -150,7 +137,12 @@ def test_synthesizer_merges_writer_output_into_a_new_draft(agents, valid_brief):
             self.payload = payload or {}
             self.findings = findings or []
 
-    writer_payload = writer.deterministic(valid_brief, draft, 1, [])
+    writer_payload = {
+        "sections": [
+            {"id": section.id, "body": f"Test model content for {section.title}."}
+            for section in valid_brief.sections
+        ]
+    }
     filled = Draft.from_brief(valid_brief)
     for item in writer_payload["sections"]:
         filled.section_map()[item["id"]].body = item["body"]
@@ -217,27 +209,17 @@ def test_filler_cleanup_does_not_change_url_scheme_case():
     assert "Https://" not in cleaned
 
 
-def test_mechanical_polish_preserves_paragraphs_and_lines(valid_brief, agents):
-    draft = Draft.from_brief(valid_brief)
-    payload = agents["writer"].deterministic(valid_brief, draft, 1, [])
-    for item in payload["sections"]:
-        body = item["body"]
-        polished, ops = __import__("articlegen.agents.writer", fromlist=["apply_mechanical_polish"]).apply_mechanical_polish(body)
-        # Convergence: polishing an already-polished body changes nothing.
-        again, _ = __import__("articlegen.agents.writer", fromlist=["apply_mechanical_polish"]).apply_mechanical_polish(polished)
-        assert again == polished
-        # Paragraph count can only grow, never merge.
-        assert polished.count("\n\n") >= body.count("\n\n")
-        # The gate's 400-character line limit is respected.
-        assert all(len(line) <= 420 for line in polished.split("\n\n"))
+def test_mechanical_polish_converges_without_generating_text():
+    from articlegen.agents.writer import apply_mechanical_polish
 
+    body = ("This is is a concise sentence, which keeps its meaning, remains clear. " * 12
+            + "\n\n" + "A separate paragraph stays separate. " * 12)
+    polished, operations = apply_mechanical_polish(body)
+    again, _ = apply_mechanical_polish(polished)
 
-def test_sections_open_on_distinct_sentences(valid_brief, agents):
-    draft = Draft.from_brief(valid_brief)
-    payload = agents["writer"].deterministic(valid_brief, draft, 1, [])
-    openings = [item["body"].split(".")[0] for item in payload["sections"]]
-    assert len(openings) == len(valid_brief.sections)
-    assert len({s.lower() for s in openings}) == len(openings), openings
+    assert operations
+    assert again == polished
+    assert polished.count("\n\n") >= body.count("\n\n")
 
 
 def test_writer_delta_block_hides_unchanged_sections(valid_brief):
@@ -262,7 +244,8 @@ def test_agent_run_marks_degraded_when_provider_fails(valid_brief):
     report = agent.run(AssembledContext(text="context", tokens=10), valid_brief,
                        Draft.from_brief(valid_brief), 1)
     assert report.status == AgentStatus.DEGRADED
-    assert any("fell back" in note for note in report.notes)
+    assert report.payload["sections"] == []
+    assert any("LLM call failed" in note for note in report.notes)
 
 
 def test_parse_json_tolerates_fences_and_preamble():

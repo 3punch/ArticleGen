@@ -124,8 +124,12 @@ def render_tracker(container, tracker: TrackerState, score_target: float = 0.85)
 
 def render_route_back(container, tracker: TrackerState) -> None:
     with container:
-        st.error(f"Input gate routed this task back: {tracker.stop_reason}")
         issues = tracker.route_back_issues
+        provider_block = any(issue.get("category") == "provider" for issue in issues)
+        if provider_block:
+            st.error(f"No draft was generated: {tracker.stop_reason}")
+        else:
+            st.error(f"Input gate routed this task back: {tracker.stop_reason}")
         if issues:
             rows = [{
                 "severity": issue.get("severity", ""),
