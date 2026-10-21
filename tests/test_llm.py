@@ -210,3 +210,112 @@ def test_resolve_client_never_leaks_to_another_provider(clear_provider_env,
     monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
     assert isinstance(resolve_client("dahl"), OfflineClient)
     assert isinstance(resolve_client("openai"), OfflineClient)
+
+
+def test_dahl_requests_low_reasoning_effort(captured_request):
+    DahlClient("test-key").complete("system", "user", max_output_tokens=64)
+    body = json.loads(captured_request["request"].data.decode("utf-8"))
+    assert body["reasoning_effort"] == "low"
+    assert body["chat_template_kwargs"]["reasoning_effort"] == "low"
+    assert body["chat_template_kwargs"]["clear_thinking"] is True
+
+
+def test_dahl_reads_json_from_reasoning_when_content_is_empty(monkeypatch):
+    payload = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "analysis\n{\"sections\": [{\"id\": \"intro\", \"body\": \"Done.\"}]}",
+            },
+        }],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 8},
+    }
+
+    def fake_urlopen(request, timeout=None):
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    response = DahlClient("k").complete("s", "u", max_output_tokens=32)
+    assert "\"intro\"" in response.text
+    assert response.finish_reason == "stop"
+
+
+def test_dahl_retries_when_thinking_consumes_the_output_budget(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):
+        calls["n"] += 1
+        body = json.loads(request.data.decode("utf-8"))
+        if calls["n"] == 1:
+            assert body["max_tokens"] == 64
+            payload = {
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"role": "assistant", "content": None,
+                                "reasoning_content": "still thinking"},
+                }],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 64},
+            }
+        else:
+            assert body["max_tokens"] >= 8192
+            payload = {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "{\"ok\": true}"},
+                }],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 6},
+            }
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    response = DahlClient("k").complete("s", "u", max_output_tokens=64)
+    assert calls["n"] == 2
+    assert response.text == "{\"ok\": true}"
+    assert response.tokens_out == 70
+
+
+def test_dahl_drops_reasoning_fields_when_the_gateway_rejects_them(monkeypatch):
+    import urllib.error
+
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):
+        calls["n"] += 1
+        body = json.loads(request.data.decode("utf-8"))
+        if "reasoning_effort" in body:
+            raise urllib.error.HTTPError(
+                request.full_url, 400, "bad request", {},
+                _FakeResponse({"error": "unknown parameter reasoning_effort"}),
+            )
+        assert "chat_template_kwargs" not in body
+        return _FakeResponse({
+            "choices": [{"message": {"content": "Hello back!"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    response = DahlClient("k").complete("s", "u", max_output_tokens=32)
+    assert calls["n"] == 2
+    assert response.text == "Hello back!"
+
+
+def test_message_text_accepts_content_parts():
+    from articlegen.llm import message_text
+
+    assert message_text({"content": [{"type": "text", "text": "{\"a\": 1}"}]}) == "{\"a\": 1}"
+
+
+def test_salvage_truncated_json_keeps_completed_sections():
+    from articlegen.llm import salvage_truncated_json
+
+    text = (
+        '{"sections": ['
+        '{"id": "introduction", "body": "Finished opening."}, '
+        '{"id": "mechanism", "body": "Cut off mid sent'
+    )
+    salvaged = salvage_truncated_json(text)
+    assert salvaged is not None
+    assert salvaged["sections"][0]["id"] == "introduction"
+    assert salvaged["sections"][0]["body"] == "Finished opening."

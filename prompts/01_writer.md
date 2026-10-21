@@ -49,5 +49,7 @@ Rules for the output:
 
 * `sections` must contain **only** the sections you changed. Omit untouched sections.
 * `id` must match an outline id exactly; never invent a new section id.
+* Always return finished JSON. If the article is long, still close the JSON object;
+  do not spend the reply on analysis before the object.
 * Body length should land within ±20% of the section's `word_target`.
 * Keep the whole response under your stated output token budget.

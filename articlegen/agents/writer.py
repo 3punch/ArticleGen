@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ..llm import coerce_findings
 from ..models import AgentReport, AgentStatus, Brief, Draft, Finding, Section, Severity
 from .base import BaseAgent
+from .payload import extract_section_list, match_section_id, section_body
 
 WRITER_REMIT = {"readability", "clarity", "completeness", "flow", "redundancy",
                 "tone", "consistency", "coverage", "balance"}
@@ -271,23 +272,25 @@ class Writer(BaseAgent):
                 tokens_out: int, peer_reports: List[AgentReport],
                 open_findings: Optional[List[Finding]] = None) -> AgentReport:
         findings: List[Finding] = []
-        produced = payload.get("sections") or []
-        valid_ids = set(brief.section_ids)
+        produced = extract_section_list(payload)
         usable: List[Dict[str, str]] = []
 
         for item in produced:
             if not isinstance(item, dict):
                 continue
-            section_id = str(item.get("id", "")).strip()
-            body = str(item.get("body", "") or "").strip()
-            if section_id not in valid_ids:
-                findings.append(Finding(
-                    agent=self.agent_id, severity=Severity.MAJOR,
-                    category="outline", section=section_id or "-",
-                    claim=f"writer returned section id '{section_id}' that is not in the outline",
-                    action="Drop the section or add it to the brief outline.",
-                    iteration=iteration,
-                ))
+            raw_id = str(item.get("id") or item.get("section_id") or item.get("section")
+                         or item.get("title") or "").strip()
+            section_id = match_section_id(raw_id, brief)
+            body = section_body(item).strip()
+            if not section_id:
+                if raw_id or body:
+                    findings.append(Finding(
+                        agent=self.agent_id, severity=Severity.MAJOR,
+                        category="outline", section=raw_id or "-",
+                        claim=f"writer returned section id '{raw_id}' that is not in the outline",
+                        action="Drop the section or add it to the brief outline.",
+                        iteration=iteration,
+                    ))
                 continue
             if body:
                 usable.append({"id": section_id, "body": body})

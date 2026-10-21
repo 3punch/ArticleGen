@@ -39,6 +39,7 @@ class LLMResponse:
     tokens_in: int = 0
     tokens_out: int = 0
     engine: str = "unknown"
+    finish_reason: str = ""
 
 
 class LLMClient:
@@ -122,37 +123,159 @@ class AnthropicClient(_HTTPClient):
         )
 
 
+_THINK_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN = re.compile(r"<think>", re.IGNORECASE)
+
+
+def strip_think(text: str) -> str:
+    """Drop a thinking trace, keeping it only when it is the entire reply.
+
+    Reasoning models sometimes wrap the answer in ``<think>`` and sometimes
+    spend the whole completion there. If anything remains outside the tags,
+    that is the answer. If not, the inner text is the only thing left to parse.
+    """
+    if not text:
+        return ""
+    inners = [part.strip() for part in _THINK_BLOCK.findall(text) if part and part.strip()]
+    stripped = _THINK_BLOCK.sub("", text).strip()
+    if stripped:
+        return stripped
+    return "\n".join(inners).strip()
+
+
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+        return "".join(parts)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("content") or "")
+    return str(value)
+
+
+def message_text(message: Dict[str, Any]) -> str:
+    """Read the assistant answer from an OpenAI-compatible message.
+
+    GLM-family servers often leave ``content`` null and put the only JSON in
+    ``reasoning_content``. Use that fallback only when the visible content has
+    no JSON of its own.
+    """
+    if not isinstance(message, dict):
+        return ""
+    content = strip_think(_coerce_text(message.get("content")))
+    reasoning = strip_think(_coerce_text(message.get("reasoning_content") or message.get("reasoning")))
+    if content and ("{" in content or "[" in content):
+        return content
+    if not content.strip() and ("{" in reasoning or "[" in reasoning):
+        return reasoning
+    return content or reasoning
+
+
+def _completion_needs_room(text: str, finish_reason: str) -> bool:
+    """True when the model spent the budget before emitting a finished answer."""
+    cleaned = strip_think(text).strip()
+    if not cleaned:
+        return True
+    opened = len(_THINK_OPEN.findall(text or ""))
+    closed = len(re.findall(r"</think>", text or "", flags=re.IGNORECASE))
+    if opened > closed and "{" not in cleaned and "[" not in cleaned:
+        return True
+    if finish_reason == "length" and not cleaned.endswith(("}", "]")):
+        return True
+    return False
+
+
+def _parameter_rejected(exc: ProviderError) -> bool:
+    text = str(exc).lower()
+    if "http 400" not in text and "http 422" not in text:
+        return False
+    if "not currently offered" in text:
+        return False
+    return True
+
+
+def _max_tokens_rejected(exc: ProviderError) -> bool:
+    text = str(exc).lower()
+    if "http 400" not in text and "http 422" not in text:
+        return False
+    return "max_tokens" in text or "max_completion_tokens" in text or "maximum context" in text
+
+
 class OpenAIClient(_HTTPClient):
     engine_name = "openai"
+    #: Dahl's default GLM model thinks unless this is set. OpenAI chat models do not.
+    reasoning_controls = False
 
     def __init__(self, api_key: str, model: str = "gpt-4o-mini",
                  base_url: str = "https://api.openai.com/v1", timeout: int = 120) -> None:
         super().__init__(api_key, model, base_url, timeout)
+        self._drop_reasoning_controls = False
+
+    def _extra_body(self) -> Dict[str, Any]:
+        return {}
 
     def complete(self, system: str, user: str, *, max_output_tokens: int = 1000) -> LLMResponse:
-        data = self._post(
-            f"{self.base_url}/chat/completions",
-            {
-                "content-type": "application/json",
-                "authorization": f"Bearer {self.api_key}",
-            },
-            {
-                "model": self.model,
-                "max_tokens": max_output_tokens,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            },
-        )
+        return self._complete_chat(system, user, max_output_tokens, allow_expand=True)
+
+    def _complete_chat(self, system: str, user: str, max_output_tokens: int, *,
+                       allow_expand: bool) -> LLMResponse:
+        extras: Dict[str, Any] = {}
+        if self.reasoning_controls and not self._drop_reasoning_controls:
+            extras = self._extra_body()
+        payload = {
+            "model": self.model,
+            "max_tokens": max_output_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            **extras,
+        }
+        try:
+            data = self._post(
+                f"{self.base_url}/chat/completions",
+                {
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {self.api_key}",
+                },
+                payload,
+            )
+        except ProviderError as exc:
+            if extras and _parameter_rejected(exc):
+                self._drop_reasoning_controls = True
+                return self._complete_chat(system, user, max_output_tokens, allow_expand=allow_expand)
+            if allow_expand and _max_tokens_rejected(exc) and max_output_tokens > 4096:
+                return self._complete_chat(system, user, 4096, allow_expand=False)
+            raise
+        response = self._response_from(data)
+        if allow_expand and _completion_needs_room(response.text, response.finish_reason):
+            expanded = min(16384, max(max_output_tokens * 2, 8192))
+            if expanded > max_output_tokens:
+                retry = self._complete_chat(system, user, expanded, allow_expand=False)
+                retry.tokens_in += response.tokens_in
+                retry.tokens_out += response.tokens_out
+                return retry
+        return response
+
+    def _response_from(self, data: Dict[str, Any]) -> LLMResponse:
         choices = data.get("choices") or []
-        text = choices[0]["message"]["content"] if choices else ""
+        choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
         usage = data.get("usage") or {}
         return LLMResponse(
-            text=text or "",
+            text=message_text(message),
             tokens_in=int(usage.get("prompt_tokens", 0) or 0),
             tokens_out=int(usage.get("completion_tokens", 0) or 0),
             engine=f"{self.engine_name}:{self.model}",
+            finish_reason=str(choice.get("finish_reason") or ""),
         )
 
 
@@ -167,12 +290,26 @@ class DahlClient(OpenAIClient):
     """
 
     engine_name = "dahl"
+    reasoning_controls = True
     DEFAULT_BASE_URL = "https://inference.dahl.global/v1"
     DEFAULT_MODEL = "zai-org/GLM-5.3-Flash"
 
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL,
                  base_url: str = DEFAULT_BASE_URL, timeout: int = 120) -> None:
         super().__init__(api_key, model, base_url, timeout)
+
+    def _extra_body(self) -> Dict[str, Any]:
+        # GLM-5.3-Flash defaults to reasoning_effort=max. A few thousand
+        # max_tokens is then spent inside <think> and content comes back empty.
+        # "low" is the lightest level the model accepts; anything else falls
+        # back to max. Dropped automatically if a gateway rejects the fields.
+        return {
+            "reasoning_effort": "low",
+            "chat_template_kwargs": {
+                "reasoning_effort": "low",
+                "clear_thinking": True,
+            },
+        }
 
 
 def resolve_client(provider: str = "auto", model: Optional[str] = None,
@@ -256,6 +393,62 @@ def resolve_client(provider: str = "auto", model: Optional[str] = None,
 _FENCE_BLOCK = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 
 
+def salvage_truncated_json(text: str) -> Optional[Dict[str, Any]]:
+    """Close a length-truncated JSON object enough to recover completed fields.
+
+    Only used after a normal parse fails. A repaired object that has neither
+    sections nor findings is rejected so a half-written key cannot become a draft.
+    """
+    if not text:
+        return None
+    start = text.find("{")
+    if start < 0:
+        return None
+    fragment = text[start:].rstrip()
+    if fragment.endswith("}"):
+        return None
+
+    def _closers(source: str) -> tuple:
+        stack: List[str] = []
+        in_string = False
+        escape = False
+        for char in source:
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                stack.append("}")
+            elif char == "[":
+                stack.append("]")
+            elif char in "}]" and stack and stack[-1] == char:
+                stack.pop()
+        return in_string, stack
+
+    in_string, stack = _closers(fragment)
+    if in_string:
+        fragment += '"'
+    # A dangling comma or colon cannot be closed into a value.
+    fragment = re.sub(r"[,:]\s*$", "", fragment)
+    _, stack = _closers(fragment)
+    fragment += "".join(reversed(stack))
+    try:
+        value = json.loads(fragment)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    if not any(key in value for key in ("sections", "findings", "draft", "article")):
+        return None
+    return value
+
+
 def parse_json(text: str) -> Union[Dict[str, Any], List[Any]]:
     """Tolerantly extract the first JSON value from a model response.
 
@@ -263,6 +456,7 @@ def parse_json(text: str) -> Union[Dict[str, Any], List[Any]]:
     broken payload is worse than failing, so a genuine parse failure raises and the
     agent marks itself DEGRADED.
     """
+    text = strip_think(text or "")
     if not text or not text.strip():
         raise ResponseParseError("empty response")
 
