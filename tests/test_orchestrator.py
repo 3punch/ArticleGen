@@ -118,17 +118,21 @@ def test_score_does_not_regress_after_the_first_iteration(tmp_path, valid_brief,
     assert all(0.0 <= s <= 1.0 for s in scores)
 
 
-def test_context_packets_respect_the_hard_cap(tmp_path, valid_brief, model_client):
+def test_context_packets_include_all_blocks_without_eviction(tmp_path, valid_brief, model_client):
+    """With no token ceiling, context packets include every block in full."""
     config = _config(tmp_path, max_iterations=2)
     orchestrator = Orchestrator(config, client=model_client)
     orchestrator.run(valid_brief)
 
-    from articlegen.tokens import count_tokens
     run_dir = tmp_path / "runs" / valid_brief.task_id / "iterations"
     context_files = list(run_dir.rglob("context-*.txt"))
     assert context_files, "no context packets were persisted"
     for path in context_files:
-        assert count_tokens(path.read_text()) <= config.budget.context_hard_cap + 60, path.name
+        text = path.read_text()
+        assert "### system_rules_digest" in text, path.name
+        assert "### task_brief" in text, path.name
+        assert "### open_findings" in text, path.name
+        assert "### rolling_history" in text, path.name
 
 
 def test_run_is_deterministic(tmp_path, valid_brief, model_client):
@@ -162,8 +166,7 @@ def test_open_findings_are_capped(tmp_path, model_client):
 def test_decide_next_stops_on_target():
     decision, reason, stall = decide_next(
         score=0.9, previous_score=0.8, iteration=1, max_iterations=4, score_target=0.85,
-        min_delta=0.01, stall_window=2, stall_count=0, tokens_total=0,
-        token_ceiling=60000, degraded=False,
+        min_delta=0.01, stall_window=2, stall_count=0, degraded=False,
     )
     assert decision == "stop"
     assert "target met" in reason
@@ -175,8 +178,7 @@ def test_decide_next_stops_on_stall_window():
     for _ in range(3):
         decision, reason, stall = decide_next(
             score=0.5, previous_score=0.5, iteration=1, max_iterations=9, score_target=0.85,
-            min_delta=0.01, stall_window=2, stall_count=stall, tokens_total=0,
-            token_ceiling=60000, degraded=False,
+            min_delta=0.01, stall_window=2, stall_count=stall, degraded=False,
         )
         if decision == "stop":
             break
@@ -184,21 +186,20 @@ def test_decide_next_stops_on_stall_window():
     assert "no material improvement" in reason
 
 
-def test_decide_next_respects_token_ceiling():
+def test_decide_next_does_not_stop_on_token_spend():
+    """There is no token ceiling: spending tokens never stops the loop."""
     decision, reason, _ = decide_next(
         score=0.3, previous_score=0.2, iteration=1, max_iterations=9, score_target=0.85,
-        min_delta=0.01, stall_window=2, stall_count=0, tokens_total=70000,
-        token_ceiling=60000, degraded=False,
+        min_delta=0.01, stall_window=2, stall_count=0, degraded=False,
     )
-    assert decision == "stop"
-    assert "token ceiling" in reason
+    assert decision == "continue"
+    assert "ceiling" not in reason
 
 
 def test_decide_next_does_not_treat_a_degraded_score_as_target_met():
     decision, reason, _ = decide_next(
         score=0.90, previous_score=None, iteration=1, max_iterations=4, score_target=0.85,
-        min_delta=0.01, stall_window=2, stall_count=0, tokens_total=0,
-        token_ceiling=60000, degraded=True,
+        min_delta=0.01, stall_window=2, stall_count=0, degraded=True,
     )
     assert decision == "continue"
     assert "target met" not in reason
@@ -215,8 +216,7 @@ def test_empty_outline_cannot_meet_the_default_target(valid_brief):
 def test_decide_next_does_not_stall_on_degraded_output():
     decision, _, stall = decide_next(
         score=0.5, previous_score=0.5, iteration=1, max_iterations=9, score_target=0.85,
-        min_delta=0.01, stall_window=1, stall_count=0, tokens_total=0,
-        token_ceiling=60000, degraded=True,
+        min_delta=0.01, stall_window=1, stall_count=0, degraded=True,
     )
     assert decision == "continue"
     assert stall == 0

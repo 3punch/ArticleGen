@@ -269,38 +269,27 @@ def test_dahl_reads_json_from_reasoning_when_content_is_empty(monkeypatch):
     assert response.finish_reason == "stop"
 
 
-def test_dahl_retries_when_thinking_consumes_the_output_budget(monkeypatch):
+def test_dahl_passes_max_tokens_through_without_expansion(monkeypatch):
+    """There is no output-token expansion ceiling: ``max_tokens`` is passed
+    through as-is and the client never retries to buy a larger budget."""
     calls = {"n": 0}
 
     def fake_urlopen(request, timeout=None):
         calls["n"] += 1
         body = json.loads(request.data.decode("utf-8"))
-        if calls["n"] == 1:
-            assert body["max_tokens"] == 64
-            payload = {
-                "choices": [{
-                    "finish_reason": "length",
-                    "message": {"role": "assistant", "content": None,
-                                "reasoning_content": "still thinking"},
-                }],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 64},
-            }
-        else:
-            assert body["max_tokens"] >= 8192
-            payload = {
-                "choices": [{
-                    "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "{\"ok\": true}"},
-                }],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 6},
-            }
-        return _FakeResponse(payload)
+        assert body["max_tokens"] == 64
+        return _FakeResponse({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": None,
+                            "reasoning_content": "still thinking"},
+            }],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 64},
+        })
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     response = DahlClient("k").complete("s", "u", max_output_tokens=64)
-    assert calls["n"] == 2
-    assert response.text == "{\"ok\": true}"
-    assert response.tokens_out == 70
+    assert calls["n"] == 1
 
 
 def test_dahl_drops_reasoning_fields_when_the_gateway_rejects_them(monkeypatch):

@@ -1,5 +1,7 @@
-from articlegen.memory import Block, RollingMemory, assemble, summarise_text
+from articlegen.memory import Block, RollingMemory, assemble, working_draft_block
+from articlegen.models import AgentReport, Draft
 from articlegen.tokens import TokenBudget, count_tokens, truncate_to_tokens
+
 
 def test_count_tokens_is_deterministic_and_monotonic():
     text = "hello world " * 50
@@ -7,69 +9,62 @@ def test_count_tokens_is_deterministic_and_monotonic():
     assert count_tokens(text + "more text") > count_tokens(text)
     assert count_tokens("") == 0
 
+
 def test_code_is_weighted_denser_than_prose():
     prose = "a" * 400
     code = "```python\n" + "x" * 388 + "\n```"
     assert count_tokens(code) > count_tokens(prose)
 
-def test_truncate_respects_the_ceiling():
+
+def test_truncate_to_tokens_respects_the_budget():
     text = "word " * 2000
     clipped = truncate_to_tokens(text, 100)
     assert count_tokens(clipped) <= 100
     assert "[...truncated by token budget...]" in clipped
 
-def test_truncate_is_a_noop_under_budget():
+
+def test_truncate_to_tokens_is_a_noop_under_budget():
     text = "short text"
     assert truncate_to_tokens(text, 500) == text
 
-def test_assemble_evicts_lowest_priority_blocks_first():
-    budget = TokenBudget(context_hard_cap=400)
+
+def test_assemble_includes_all_blocks_with_no_eviction():
+    """With no token ceiling, every non-empty block is included in full."""
     blocks = [
-        Block(1, "rules", "rule one. " * 10, required=True),
+        Block(1, "rules", "rule one. " * 10),
         Block(3, "draft", "draft body. " * 60),
         Block(5, "history", "old history. " * 60),
     ]
-    result = assemble(blocks, budget)
-    assert count_tokens(result.text) <= budget.context_hard_cap
+    result = assemble(blocks)
     assert "rules" in result.included
-    assert "history" in result.evicted
+    assert "draft" in result.included
+    assert "history" in result.included
+    assert result.evicted == []
+    assert result.truncated == []
+    assert result.breached_cap is False
 
-def test_assemble_truncates_required_blocks_rather_than_dropping_them():
-    budget = TokenBudget(context_hard_cap=120)
+
+def test_assemble_keeps_required_blocks_in_full():
+    """Required blocks are never truncated or dropped for size."""
     blocks = [Block(1, "rules", "important rule. " * 200, required=True)]
-    result = assemble(blocks, budget)
+    result = assemble(blocks)
     assert "rules" in result.included
-    assert "rules" in result.truncated
-    assert result.breached_cap is True
-    assert count_tokens(result.text) <= budget.context_hard_cap + 40
+    assert result.truncated == []
+    assert result.breached_cap is False
 
-def test_rolling_memory_stays_within_its_budget_across_many_iterations():
-    memory = RollingMemory(max_tokens=200, max_entries=5)
+
+def test_rolling_memory_is_bounded_by_entry_count_not_tokens():
+    """Rolling memory is capped by entry count, not by a token budget."""
+    memory = RollingMemory(max_entries=5)
     for iteration in range(30):
-        memory.absorb(
-            f"Iteration {iteration} raised a blocker in citations and a major readability "
-            f"problem, applied four fixes and deferred two findings for later review."
-        )
-    rendered = memory.render()
-    assert len(memory.entries) <= 5
-    assert count_tokens(rendered) <= 260  # budget plus folding markers
-
-def test_summarise_text_prefers_high_signal_sentences():
-    text = (
-        "Filler sentence about nothing in particular at all. "
-        "A blocker was found in the citations section. "
-        "Another sentence that adds no signal whatsoever. "
-        "The run must never re-pass full history."
-    )
-    summary = summarise_text(text, 40)
-    assert "blocker" in summary.lower() or "never" in summary.lower()
-    assert count_tokens(summary) <= 40
+        memory.absorb(f"Iteration {iteration} entry")
+    assert len(memory.entries) == 5
+    assert memory.entries[-1] == "Iteration 29 entry"
 
 
 def test_working_draft_overlays_writer_delta_without_mutating_master(valid_brief):
     import json
     from articlegen.memory import working_draft_block
-    from articlegen.models import AgentReport, Draft
 
     draft = Draft.from_brief(valid_brief)
     for section in draft.sections:

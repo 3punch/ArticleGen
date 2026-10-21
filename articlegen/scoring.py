@@ -113,20 +113,17 @@ def score_iteration(brief: Brief, draft: Draft, reports: List[AgentReport],
 
 def decide_next(score: float, previous_score: Optional[float], *, iteration: int,
                 max_iterations: int, score_target: float, min_delta: float,
-                stall_window: int, stall_count: int, tokens_total: int,
-                token_ceiling: int, degraded: bool) -> tuple:
+                stall_window: int, stall_count: int, degraded: bool) -> tuple:
     """Return ``(decision, stop_reason, new_stall_count)``.
 
     ``decision`` is one of: ``stop``, ``continue``. ``stop_reason`` is always a
-    concrete, logged cause (rule R8) - the loop never ends silently.
+    concrete, logged cause (rule R8) - the loop never ends silently. A run is
+    never stopped because of token spend: there is no token ceiling.
     """
     # A degraded iteration has no trustworthy score. Stopping here is how an
     # empty outline used to exit as "score target met (0.8500 >= 0.85)".
     if score >= score_target and not degraded:
         return "stop", f"score target met ({score:.4f} >= {score_target})", 0
-
-    if tokens_total >= token_ceiling:
-        return "stop", f"token ceiling reached ({tokens_total} >= {token_ceiling})", stall_count
 
     if iteration >= max_iterations:
         return "stop", f"max iterations reached ({max_iterations})", stall_count

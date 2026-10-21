@@ -425,7 +425,12 @@ class ResearchPipeline:
         })
 
     # -- context for the drafting loop -----------------------------------
-    def context_block(self, max_tokens: int = 1400) -> str:
+    def context_block(self, max_tokens: Optional[int] = None) -> str:
+        """The evidence packet handed to the writing agents.
+
+        ``max_tokens`` defaults to ``None``: the pipeline applies no token ceiling
+        (see ``articlegen.tokens``). A caller may still request a limit explicitly.
+        """
         if not self.outcome.enabled:
             return ""
         plan = self.outcome.plan
@@ -452,7 +457,8 @@ class ResearchPipeline:
             if code_parts:
                 parts.append("EXECUTED CODE\n" + "\n\n".join(code_parts))
         text = "\n\n".join(parts)
-        self._context = truncate_to_tokens(text, max_tokens)
+        self._context = (truncate_to_tokens(text, max_tokens)
+                         if max_tokens is not None else text)
         return self._context
 
     # -- stage 5: verify displayed code ----------------------------------
