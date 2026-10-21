@@ -299,6 +299,7 @@ overrides:
 export DAHL_API_KEY='<Dahl API key>'          # required
 export DAHL_MODEL='zai-org/GLM-5.3-Flash'     # optional; this is the default model
 export DAHL_BASE_URL='https://inference.dahl.global/v1'   # optional; the default
+export ARTICLEGEN_LLM_TIMEOUT_SECONDS=600       # optional; request timeout defaults to 300 seconds
 # or per run:
 articlegen run brief.json --provider dahl --model zai-org/GLM-5.3-Flash
 ```
@@ -311,7 +312,10 @@ engine and the Writer contains no static sentence-template pool.
 In the dashboard sidebar, choose `dahl`, enter the API key in the password field, and
 set the model ID (default: `zai-org/GLM-5.3-Flash`). The key is held only in the
 Streamlit session and is not written to the brief, config, or run logs. For CLI runs,
-set `DAHL_API_KEY` and optionally `DAHL_MODEL` in the environment.
+set `DAHL_API_KEY` and optionally `DAHL_MODEL` in the environment. Provider calls have
+a 300-second socket timeout by default; set `ARTICLEGEN_LLM_TIMEOUT_SECONDS` (or pass
+`timeout` to `resolve_client`) to allow longer completions. A timed-out call is recorded
+as a degraded agent with an actionable message rather than an uncaught UI traceback.
 
 **Verification status:** provider request formats are covered by stubbed HTTP tests;
 this sandbox cannot call the live Dahl/Anthropic/OpenAI endpoints.

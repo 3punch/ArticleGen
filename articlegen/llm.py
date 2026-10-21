@@ -25,6 +25,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
 
+DEFAULT_LLM_TIMEOUT_SECONDS = 300
+LLM_TIMEOUT_ENV = "ARTICLEGEN_LLM_TIMEOUT_SECONDS"
+
+
 class ProviderError(RuntimeError):
     pass
 
@@ -66,12 +70,21 @@ class OfflineClient(LLMClient):
 
 
 class _HTTPClient(LLMClient):
-    def __init__(self, api_key: str, model: str, base_url: str, timeout: int = 120) -> None:
+    def __init__(self, api_key: str, model: str, base_url: str,
+                 timeout: int = DEFAULT_LLM_TIMEOUT_SECONDS) -> None:
+        if timeout <= 0:
+            raise ValueError("LLM request timeout must be a positive number of seconds")
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.available = bool(api_key)
+
+    def _timeout_error(self) -> ProviderError:
+        return ProviderError(
+            f"{self.engine_name} request timed out after {self.timeout} seconds; "
+            f"increase {LLM_TIMEOUT_ENV} if this model needs longer to respond"
+        )
 
     def _post(self, url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
@@ -82,7 +95,14 @@ class _HTTPClient(LLMClient):
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:400]
             raise ProviderError(f"{self.engine_name} HTTP {exc.code}: {detail}") from exc
+        except TimeoutError as exc:
+            # urllib can expose socket read timeouts directly, particularly while
+            # waiting for the first response byte. Keep them in the provider error
+            # path so an agent is marked DEGRADED instead of crashing the UI.
+            raise self._timeout_error() from exc
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError) or "timed out" in str(exc.reason).lower():
+                raise self._timeout_error() from exc
             raise ProviderError(f"{self.engine_name} network error: {exc.reason}") from exc
         try:
             return json.loads(raw)
@@ -94,7 +114,8 @@ class AnthropicClient(_HTTPClient):
     engine_name = "anthropic"
 
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-5",
-                 base_url: str = "https://api.anthropic.com/v1", timeout: int = 120) -> None:
+                 base_url: str = "https://api.anthropic.com/v1",
+                 timeout: int = DEFAULT_LLM_TIMEOUT_SECONDS) -> None:
         super().__init__(api_key, model, base_url, timeout)
 
     def complete(self, system: str, user: str, *, max_output_tokens: int = 1000) -> LLMResponse:
@@ -215,7 +236,8 @@ class OpenAIClient(_HTTPClient):
     reasoning_controls = False
 
     def __init__(self, api_key: str, model: str = "gpt-4o-mini",
-                 base_url: str = "https://api.openai.com/v1", timeout: int = 120) -> None:
+                 base_url: str = "https://api.openai.com/v1",
+                 timeout: int = DEFAULT_LLM_TIMEOUT_SECONDS) -> None:
         super().__init__(api_key, model, base_url, timeout)
         self._drop_reasoning_controls = False
 
@@ -295,7 +317,8 @@ class DahlClient(OpenAIClient):
     DEFAULT_MODEL = "zai-org/GLM-5.3-Flash"
 
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL,
-                 base_url: str = DEFAULT_BASE_URL, timeout: int = 120) -> None:
+                 base_url: str = DEFAULT_BASE_URL,
+                 timeout: int = DEFAULT_LLM_TIMEOUT_SECONDS) -> None:
         super().__init__(api_key, model, base_url, timeout)
 
     def _extra_body(self) -> Dict[str, Any]:
@@ -312,17 +335,35 @@ class DahlClient(OpenAIClient):
         }
 
 
+def _resolve_timeout(timeout: Optional[int]) -> int:
+    """Resolve and validate the HTTP socket timeout from an arg or environment."""
+    if timeout is None:
+        raw = os.environ.get(LLM_TIMEOUT_ENV, "").strip()
+        if not raw:
+            return DEFAULT_LLM_TIMEOUT_SECONDS
+        try:
+            timeout = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{LLM_TIMEOUT_ENV} must be a positive integer") from exc
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise ValueError(f"{LLM_TIMEOUT_ENV} must be a positive integer")
+    return timeout
+
+
 def resolve_client(provider: str = "auto", model: Optional[str] = None,
                    api_key: Optional[str] = None, base_url: Optional[str] = None,
                    dahl_api_key: Optional[str] = None, dahl_model: Optional[str] = None,
-                   dahl_base_url: Optional[str] = None) -> LLMClient:
+                   dahl_base_url: Optional[str] = None,
+                   timeout: Optional[int] = None) -> LLMClient:
     """Resolve a provider from explicit settings first, then environment.
 
     An empty UI field does not mask a configured environment variable. In ``auto``
     mode, a Dahl key explicitly entered in the UI takes priority; otherwise the
     environment priority is Anthropic, OpenAI, then Dahl. Missing credentials return
     an unavailable ``OfflineClient`` sentinel so the orchestrator can explain the
-    problem without generating a fallback article.
+    problem without generating a fallback article. HTTP requests use a 300-second
+    socket timeout by default; pass ``timeout`` or set
+    ``ARTICLEGEN_LLM_TIMEOUT_SECONDS`` to override it.
     """
     provider = (provider or "auto").strip().lower()
     explicit_key = (api_key or "").strip() or None
@@ -348,7 +389,12 @@ def resolve_client(provider: str = "auto", model: Optional[str] = None,
             or os.environ.get("DAHL_BASE_URL", "").strip()
             or DahlClient.DEFAULT_BASE_URL
         )
-        return DahlClient(key, resolved_model, resolved_base) if key else OfflineClient()
+        if key:
+            return DahlClient(
+                key, resolved_model, resolved_base,
+                timeout=_resolve_timeout(timeout),
+            )
+        return OfflineClient()
 
     if provider in ("auto", "anthropic"):
         key = explicit_key or os.environ.get("ANTHROPIC_API_KEY", "").strip()
@@ -356,6 +402,7 @@ def resolve_client(provider: str = "auto", model: Optional[str] = None,
             return AnthropicClient(
                 key, explicit_model or "claude-sonnet-4-5",
                 explicit_base or "https://api.anthropic.com/v1",
+                timeout=_resolve_timeout(timeout),
             )
         if provider == "anthropic":
             return OfflineClient()
@@ -366,6 +413,7 @@ def resolve_client(provider: str = "auto", model: Optional[str] = None,
             return OpenAIClient(
                 key, explicit_model or "gpt-4o-mini",
                 explicit_base or "https://api.openai.com/v1",
+                timeout=_resolve_timeout(timeout),
             )
         if provider == "openai":
             return OfflineClient()
@@ -381,6 +429,7 @@ def resolve_client(provider: str = "auto", model: Optional[str] = None,
                 explicit_dahl_base or explicit_base
                 or os.environ.get("DAHL_BASE_URL", "").strip()
                 or DahlClient.DEFAULT_BASE_URL,
+                timeout=_resolve_timeout(timeout),
             )
 
     # ``offline`` is supported only as an internal testing sentinel. It has no
