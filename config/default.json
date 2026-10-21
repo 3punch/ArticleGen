@@ -5,18 +5,5 @@
   "stall_window": 2,
   "provider": "auto",
   "workspace": "runs",
-  "changelog_path": "change_log.md",
-  "token_budget": {
-    "context_hard_cap": 4800,
-    "context_soft_warn": 3800,
-    "run_token_ceiling": 80000,
-    "reserve_for_response": 2000,
-    "agents": {
-      "writer": { "max_input_tokens": 2000, "max_output_tokens": 8192 },
-      "tester": { "max_input_tokens": 2000, "max_output_tokens": 4096 },
-      "reviewer": { "max_input_tokens": 2000, "max_output_tokens": 4096 },
-      "architect": { "max_input_tokens": 1800, "max_output_tokens": 4096 },
-      "synthesizer": { "max_input_tokens": 2400, "max_output_tokens": 8192 }
-    }
-  }
+  "changelog_path": "change_log.md"
 }

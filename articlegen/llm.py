@@ -145,7 +145,6 @@ class AnthropicClient(_HTTPClient):
 
 
 _THINK_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN = re.compile(r"<think>", re.IGNORECASE)
 
 
 def strip_think(text: str) -> str:
@@ -200,20 +199,6 @@ def message_text(message: Dict[str, Any]) -> str:
     return content or reasoning
 
 
-def _completion_needs_room(text: str, finish_reason: str) -> bool:
-    """True when the model spent the budget before emitting a finished answer."""
-    cleaned = strip_think(text).strip()
-    if not cleaned:
-        return True
-    opened = len(_THINK_OPEN.findall(text or ""))
-    closed = len(re.findall(r"</think>", text or "", flags=re.IGNORECASE))
-    if opened > closed and "{" not in cleaned and "[" not in cleaned:
-        return True
-    if finish_reason == "length" and not cleaned.endswith(("}", "]")):
-        return True
-    return False
-
-
 def _parameter_rejected(exc: ProviderError) -> bool:
     text = str(exc).lower()
     if "http 400" not in text and "http 422" not in text:
@@ -221,13 +206,6 @@ def _parameter_rejected(exc: ProviderError) -> bool:
     if "not currently offered" in text:
         return False
     return True
-
-
-def _max_tokens_rejected(exc: ProviderError) -> bool:
-    text = str(exc).lower()
-    if "http 400" not in text and "http 422" not in text:
-        return False
-    return "max_tokens" in text or "max_completion_tokens" in text or "maximum context" in text
 
 
 class OpenAIClient(_HTTPClient):
@@ -245,10 +223,9 @@ class OpenAIClient(_HTTPClient):
         return {}
 
     def complete(self, system: str, user: str, *, max_output_tokens: int = 1000) -> LLMResponse:
-        return self._complete_chat(system, user, max_output_tokens, allow_expand=True)
+        return self._complete_chat(system, user, max_output_tokens)
 
-    def _complete_chat(self, system: str, user: str, max_output_tokens: int, *,
-                       allow_expand: bool) -> LLMResponse:
+    def _complete_chat(self, system: str, user: str, max_output_tokens: int) -> LLMResponse:
         extras: Dict[str, Any] = {}
         if self.reasoning_controls and not self._drop_reasoning_controls:
             extras = self._extra_body()
@@ -273,19 +250,9 @@ class OpenAIClient(_HTTPClient):
         except ProviderError as exc:
             if extras and _parameter_rejected(exc):
                 self._drop_reasoning_controls = True
-                return self._complete_chat(system, user, max_output_tokens, allow_expand=allow_expand)
-            if allow_expand and _max_tokens_rejected(exc) and max_output_tokens > 4096:
-                return self._complete_chat(system, user, 4096, allow_expand=False)
+                return self._complete_chat(system, user, max_output_tokens)
             raise
-        response = self._response_from(data)
-        if allow_expand and _completion_needs_room(response.text, response.finish_reason):
-            expanded = min(16384, max(max_output_tokens * 2, 8192))
-            if expanded > max_output_tokens:
-                retry = self._complete_chat(system, user, expanded, allow_expand=False)
-                retry.tokens_in += response.tokens_in
-                retry.tokens_out += response.tokens_out
-                return retry
-        return response
+        return self._response_from(data)
 
     def _response_from(self, data: Dict[str, Any]) -> LLMResponse:
         choices = data.get("choices") or []

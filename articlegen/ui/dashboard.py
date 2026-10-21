@@ -77,12 +77,11 @@ def _load_example() -> Dict[str, Any]:
 
 with st.sidebar:
     st.title("📝 ArticleGen")
-    st.caption("Iterative multi-agent pipeline with bounded context")
+    st.caption("Iterative multi-agent article pipeline")
 
     st.subheader("Run settings")
     iterations = st.slider("Max iterations", 1, 8, 4)
     score_target = st.slider("Target score", 0.50, 0.99, 0.85, 0.01)
-    cap = st.number_input("Context hard cap (tokens)", 500, 20000, 6000, 100)
     provider = st.selectbox(
         "Provider", ["dahl", "auto", "anthropic", "openai"],
         help="Article generation requires a Dahl, Anthropic or OpenAI API key. Offline templating is disabled.",
@@ -312,7 +311,6 @@ with tab_brief:
             "provider": provider,
             "workspace": workspace,
             "changelog_path": changelog_path,
-            "token_budget": {"context_hard_cap": int(cap)},
         })
         # Build LLM client from sidebar inputs (takes precedence over env vars)
         llm_client = resolve_client(

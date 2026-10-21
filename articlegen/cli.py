@@ -110,9 +110,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         config.workspace = args.workspace
     if args.changelog:
         config.changelog_path = args.changelog
-    if args.cap is not None:
-        config.budget.context_hard_cap = args.cap
-        config.budget.context_soft_warn = min(config.budget.context_soft_warn, args.cap)
 
     brief = Brief.from_dict(_load_json(args.brief))
     orchestrator = Orchestrator(config, changelog=ChangeLog(config.changelog_path))
@@ -123,7 +120,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"stop      : {result.stop_reason}")
     print(f"score     : {result.final_score:.4f} (target {config.score_target})")
     print(f"iterations: {len(result.iterations)}")
-    print(f"tokens    : {result.tokens_total} (ceiling {config.budget.run_token_ceiling})")
+    print(f"tokens    : {result.tokens_total}")
     print(f"workspace : {result.workspace or '(not created; run stopped before generation)'}")
     if result.final_draft is not None:
         print(f"draft     : {os.path.join(result.workspace, 'master_draft.md')}")
@@ -264,7 +261,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="articlegen",
-        description="Iterative multi-agent article/code pipeline with bounded context.",
+        description="Iterative multi-agent article/code pipeline.",
     )
     parser.add_argument("--version", action="version", version=f"articlegen {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -289,7 +286,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--workspace", default=None)
     run.add_argument("--changelog", default=None)
     run.add_argument("--config", default=None)
-    run.add_argument("--cap", type=int, default=None, help="context hard cap in tokens")
     run.add_argument("--json", default=None, help="write the full result JSON here")
     run.set_defaults(func=cmd_run)
 
@@ -317,7 +313,6 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--model", default=None,
                       help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     demo.add_argument("--config", default=None)
-    demo.add_argument("--cap", type=int, default=None)
     demo.add_argument("--target", type=float, default=None)
     demo.add_argument("--json", default=None)
     demo.set_defaults(func=cmd_demo)
