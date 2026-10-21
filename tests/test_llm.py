@@ -10,6 +10,7 @@ import json
 import pytest
 
 from articlegen.llm import (
+    DEFAULT_LLM_TIMEOUT_SECONDS,
     DahlClient,
     OfflineClient,
     OpenAIClient,
@@ -38,7 +39,7 @@ class _FakeResponse:
 @pytest.fixture
 def clear_provider_env(monkeypatch):
     for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DAHL_API_KEY",
-                "DAHL_MODEL", "DAHL_BASE_URL"):
+                "DAHL_MODEL", "DAHL_BASE_URL", "ARTICLEGEN_LLM_TIMEOUT_SECONDS"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -68,6 +69,7 @@ def test_dahl_client_posts_openai_compatible_chat_completions(captured_request):
     response = client.complete("You are helpful.", "Hello!", max_output_tokens=64)
 
     request = captured_request["request"]
+    assert captured_request["timeout"] == DEFAULT_LLM_TIMEOUT_SECONDS
     assert request.full_url == "https://inference.dahl.global/v1/chat/completions"
     assert request.get_header("Authorization") == "Bearer test-key"
     assert request.get_header("Content-type") == "application/json"
@@ -119,6 +121,23 @@ def test_dahl_http_error_is_wrapped_as_provider_error(monkeypatch):
     assert "dahl HTTP 401" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_dahl_timeouts_are_wrapped_as_provider_errors(monkeypatch, wrapped):
+    import urllib.error
+
+    def fake_urlopen(request, timeout=None):
+        timeout_error = TimeoutError("The read operation timed out")
+        if wrapped:
+            raise urllib.error.URLError(timeout_error)
+        raise timeout_error
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(ProviderError) as excinfo:
+        DahlClient("test-key", timeout=45).complete("s", "u")
+    assert "dahl request timed out after 45 seconds" in str(excinfo.value)
+    assert "ARTICLEGEN_LLM_TIMEOUT_SECONDS" in str(excinfo.value)
+
+
 # -- resolve_client ------------------------------------------------------
 
 
@@ -134,6 +153,14 @@ def test_resolve_client_dahl_without_key_degrades_to_offline(clear_provider_env)
     client = resolve_client("dahl")
     assert isinstance(client, OfflineClient)
     assert client.available is False
+
+
+def test_resolve_client_uses_configured_timeout(clear_provider_env, monkeypatch):
+    monkeypatch.setenv("DAHL_API_KEY", "test-key")
+    monkeypatch.setenv("ARTICLEGEN_LLM_TIMEOUT_SECONDS", "450")
+
+    assert resolve_client("dahl").timeout == 450
+    assert resolve_client("dahl", timeout=35).timeout == 35
 
 
 def test_resolve_client_auto_prefers_anthropic_then_openai_then_dahl(
