@@ -384,15 +384,16 @@ def app_test():
 
 
 @requires_streamlit
-def test_app_boots_with_all_five_tabs(app_test):
+def test_app_boots_with_all_six_tabs(app_test):
     app_test.run()
     assert not app_test.exception, app_test.exception
     labels = [tab.label for tab in app_test.tabs]
     # The Draft and Change Log tabs contain nested sub-tabs, so AppTest reports
-    # more than five; assert the five top-level ones appear in order at the front.
-    top_level = labels[:5]
+    # more than six; assert the six top-level ones appear in order at the front.
+    top_level = labels[:6]
     assert [label for label in top_level] == [
-        "📋 Brief", "⚡ Execution", "📈 Scores", "📄 Draft", "📜 Change Log",
+        "📋 Brief", "⚡ Execution", "🔬 Research", "📈 Scores", "📄 Draft",
+        "📜 Change Log",
     ], labels
 
 
