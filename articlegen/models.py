@@ -57,6 +57,100 @@ class Severity(str, Enum):
             return default if default is not None else cls.MINOR
 
 
+class ArticleType(str, Enum):
+    """What kind of article is being produced.
+
+    The type selects the research-plan shape, the required sections and the
+    validation rules. A general/educational article is not forced into the
+    empirical-paper checklist; a computational paper must supply executed
+    experiments, a correctness argument and complexity analysis.
+    """
+
+    GENERAL = "general"
+    EDUCATIONAL = "educational"
+    CONCEPTUAL = "conceptual"
+    EMPIRICAL = "empirical"
+    COMPUTATIONAL = "computational"
+    THEORETICAL = "theoretical"
+    SYSTEMATIC_REVIEW = "systematic_review"
+    NARRATIVE_REVIEW = "narrative_review"
+    METHODS = "methods"
+
+    @classmethod
+    def parse(cls, value: Any, default: "ArticleType" = None) -> "ArticleType":
+        fallback = default if default is not None else cls.GENERAL
+        if isinstance(value, cls):
+            return value
+        if value is None or value == "":
+            return fallback
+        token = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "review": "narrative_review",
+            "literature_review": "narrative_review",
+            "systematic": "systematic_review",
+            "meta_analysis": "systematic_review",
+            "algorithmic": "computational",
+            "computer_science": "computational",
+            "theory": "theoretical",
+            "mathematics": "theoretical",
+            "software": "methods",
+            "method": "methods",
+            "tutorial": "educational",
+            "conceptual_paper": "conceptual",
+            "experimental": "empirical",
+        }
+        token = aliases.get(token, token)
+        try:
+            return cls(token)
+        except ValueError:
+            return fallback
+
+    @property
+    def is_research(self) -> bool:
+        """True when the article makes a research contribution requiring evidence."""
+        return self not in (ArticleType.GENERAL, ArticleType.EDUCATIONAL)
+
+    @property
+    def wants_sources(self) -> bool:
+        return self.is_research
+
+    @property
+    def wants_experiments(self) -> bool:
+        return self in (ArticleType.EMPIRICAL, ArticleType.COMPUTATIONAL,
+                        ArticleType.METHODS, ArticleType.SYSTEMATIC_REVIEW)
+
+    @property
+    def wants_correctness_argument(self) -> bool:
+        return self in (ArticleType.COMPUTATIONAL, ArticleType.THEORETICAL)
+
+
+class CitationStyle(str, Enum):
+    """Supported bibliography formats. Vendors add their own later."""
+
+    APA = "apa"
+    IEEE = "ieee"
+    VANCOUVER = "vancouver"
+    PLAIN = "plain"
+
+    @classmethod
+    def parse(cls, value: Any, default: "CitationStyle" = None) -> "CitationStyle":
+        fallback = default if default is not None else cls.APA
+        if isinstance(value, cls):
+            return value
+        if value is None or value == "":
+            return fallback
+        token = str(value).strip().lower()
+        if token.startswith("apa") or "american psychological" in token:
+            return cls.APA
+        if token.startswith("ieee") or "electrical" in token:
+            return cls.IEEE
+        if token.startswith("vancouver") or token.startswith("icmje"):
+            return cls.VANCOUVER
+        if token in ("plain", "numeric", "custom", "journal"):
+            return cls.PLAIN
+        return fallback
+
+
 class Mode(str, Enum):
     ARTICLE = "article"
     CODE = "code"
@@ -119,10 +213,37 @@ class Brief:
     constraints: List[str] = field(default_factory=list)
     requires_citations: bool = False
     language: str = "en"
+    # -- research configuration (all optional; defaults keep general articles) --
+    article_type: ArticleType = ArticleType.GENERAL
+    venue: str = ""
+    citation_style: CitationStyle = CitationStyle.APA
+    research_question: str = ""
+    contribution_type: str = ""
+    requires_experiments: bool = False
+    execute_experiments: bool = True
+    source_retrieval: str = "auto"
+    max_sources: int = 20
+    review_iterations: int = 1
+    experiment_timeout: int = 30
+    novelty_claim: bool = False
+    #: User-supplied source records. They are stored verbatim and marked
+    #: user-provided; they are never silently treated as index-verified.
+    sources: List[Dict[str, Any]] = field(default_factory=list)
+    #: Benchmark descriptors supplied by the user (hardware, repetitions, ...).
+    benchmark: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def research_enabled(self) -> bool:
+        """Research mode is explicit, never inferred from prose style."""
+        return bool(self.article_type.is_research or self.research_question
+                    or self.contribution_type or self.requires_experiments
+                    or self.citation_style != CitationStyle.APA)
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["mode"] = self.mode.value
+        data["article_type"] = self.article_type.value
+        data["citation_style"] = self.citation_style.value
         data["sections"] = [s.to_dict() for s in self.sections]
         return data
 
@@ -157,6 +278,23 @@ class Brief:
                                            f"{prefix}.word_target"),
             ))
 
+        raw_sources = data.get("sources")
+        if raw_sources is None:
+            raw_sources = []
+        if not isinstance(raw_sources, list):
+            raise ValueError("sources must be an array of source records")
+        sources: List[Dict[str, Any]] = []
+        for index, item in enumerate(raw_sources):
+            if not isinstance(item, dict):
+                raise ValueError(f"sources[{index}] must be an object")
+            sources.append(dict(item))
+
+        raw_benchmark = data.get("benchmark")
+        if raw_benchmark is None:
+            raw_benchmark = {}
+        if not isinstance(raw_benchmark, dict):
+            raise ValueError("benchmark must be an object")
+
         raw_constraints = data.get("constraints")
         if raw_constraints is None:
             raw_constraints = []
@@ -180,6 +318,30 @@ class Brief:
         else:
             raise ValueError("mode must be either 'article' or 'code'")
 
+        article_type = ArticleType.parse(data.get("article_type", ""))
+        citation_style = CitationStyle.parse(data.get("citation_style", ""))
+
+        requires_experiments = data.get("requires_experiments", False)
+        if requires_experiments is None:
+            requires_experiments = False
+        if not isinstance(requires_experiments, bool):
+            raise ValueError("requires_experiments must be a boolean")
+
+        execute_experiments = data.get("execute_experiments", True)
+        if execute_experiments is None:
+            execute_experiments = True
+        if not isinstance(execute_experiments, bool):
+            raise ValueError("execute_experiments must be a boolean")
+
+        novelty_claim = data.get("novelty_claim", False)
+        if novelty_claim is None:
+            novelty_claim = False
+        if not isinstance(novelty_claim, bool):
+            raise ValueError("novelty_claim must be a boolean")
+
+        source_retrieval = _text_value(data.get("source_retrieval", ""),
+                                       "source_retrieval").lower() or "auto"
+
         requires_citations = data.get("requires_citations", False)
         if requires_citations is None:
             requires_citations = False
@@ -201,6 +363,24 @@ class Brief:
             constraints=constraints,
             requires_citations=requires_citations,
             language=language,
+            article_type=article_type,
+            venue=_text_value(data.get("venue", ""), "venue"),
+            citation_style=citation_style,
+            research_question=_text_value(data.get("research_question", ""),
+                                          "research_question"),
+            contribution_type=_text_value(data.get("contribution_type", ""),
+                                         "contribution_type"),
+            requires_experiments=requires_experiments,
+            execute_experiments=execute_experiments,
+            source_retrieval=source_retrieval,
+            max_sources=_integer_value(data.get("max_sources", 20), "max_sources", 20),
+            review_iterations=_integer_value(data.get("review_iterations", 1),
+                                             "review_iterations", 1),
+            experiment_timeout=_integer_value(data.get("experiment_timeout", 30),
+                                              "experiment_timeout", 30),
+            novelty_claim=novelty_claim,
+            sources=sources,
+            benchmark=dict(raw_benchmark),
         )
 
     @property
@@ -441,6 +621,12 @@ class RunResult:
     workspace: str = ""
     tokens_total: int = 0
     stop_reason: str = ""
+    #: Structured research artefacts (plan, sources, experiments, validation,
+    #: review, quality gate). Empty for a general non-research article.
+    research: Dict[str, Any] = field(default_factory=dict)
+    #: READY_FOR_REVIEW / NEEDS_REVISION / INCOMPLETE_OR_UNVERIFIED, or "" when
+    #: the research pipeline did not run.
+    quality_status: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -450,6 +636,8 @@ class RunResult:
             "final_score": round(self.final_score, 4),
             "tokens_total": self.tokens_total,
             "workspace": self.workspace,
+            "quality_status": self.quality_status,
+            "research": self.research,
             "gate": self.gate.to_dict() if self.gate else None,
             "iterations": [i.to_dict() for i in self.iterations],
             "draft": self.final_draft.to_dict() if self.final_draft else None,

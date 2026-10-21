@@ -34,6 +34,7 @@ from .models import (
     Severity,
 )
 from .prompts import rules_digest
+from .research.pipeline import ResearchOutcome, ResearchPipeline
 from .scoring import ScoreCard, decide_next, draft_is_publishable, score_iteration
 from .tokens import TokenBudget
 
@@ -51,6 +52,16 @@ class OrchestratorConfig:
     prompt_dir: Optional[str] = None
     rules_path: Optional[str] = None
     budget: TokenBudget = field(default_factory=TokenBudget.default)
+    #: Research mode adds plan, source, execution, review and gate stages. It is only
+    #: engaged for briefs that declare a research article type or research fields.
+    research: bool = True
+    model_planning: bool = True
+    model_review: bool = True
+    source_retrieval: Optional[str] = None
+    max_sources: Optional[int] = None
+    review_iterations: int = 1
+    execute_experiments: Optional[bool] = None
+    experiment_timeout: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "OrchestratorConfig":
@@ -67,6 +78,18 @@ class OrchestratorConfig:
             prompt_dir=data.get("prompt_dir"),
             rules_path=data.get("rules_path"),
             budget=TokenBudget.from_dict(data.get("token_budget") or {}, base.budget),
+            research=bool(data.get("research", base.research)),
+            model_planning=bool(data.get("model_planning", base.model_planning)),
+            model_review=bool(data.get("model_review", base.model_review)),
+            source_retrieval=data.get("source_retrieval", base.source_retrieval),
+            max_sources=(int(data["max_sources"]) if data.get("max_sources") is not None
+                         else base.max_sources),
+            review_iterations=int(data.get("review_iterations", base.review_iterations)),
+            execute_experiments=data.get("execute_experiments",
+                                         base.execute_experiments),
+            experiment_timeout=(int(data["experiment_timeout"])
+                                if data.get("experiment_timeout") is not None
+                                else base.experiment_timeout),
         )
 
 
@@ -84,6 +107,8 @@ class Orchestrator:
         self._digest = rules_digest(self.config.rules_path)
         #: Optional progress bus. The dashboard subscribes to this; the CLI does not.
         self.events = events or EventBus()
+        #: Research pipeline for the current run (``None`` when research mode is off).
+        self.research: Optional[ResearchPipeline] = None
 
     # -- entry point ------------------------------------------------------
     def run(self, brief: Brief) -> RunResult:
@@ -167,6 +192,43 @@ class Orchestrator:
         store.absorb_findings(gate.issues)   # gate's non-blocking issues become work items
         store.save_state()
 
+        # -- research stages (plan -> sources -> experiments) --------------
+        # Experiments run *before* drafting: the Writer must receive recorded results
+        # rather than invent them. A failure here is recorded, never hidden - the gate
+        # will report the run as incomplete rather than letting prose stand in for
+        # evidence.
+        self.research = None
+        research_failure = ""
+        if self.config.research and brief.research_enabled:
+            self.research = ResearchPipeline(
+                client=self.client, store=store, brief=brief, enabled=True,
+                model_planning=self.config.model_planning,
+                model_review=self.config.model_review,
+                source_retrieval=self.config.source_retrieval,
+                max_sources=self.config.max_sources,
+                review_iterations=self.config.review_iterations,
+                experiment_timeout=self.config.experiment_timeout,
+                execute_experiments=self.config.execute_experiments,
+                prompt_dir=self.config.prompt_dir,
+                events=self.events,
+            )
+            try:
+                self.research.begin()
+            except Exception as exc:  # noqa: BLE001 - research must not lose the run
+                research_failure = f"{type(exc).__name__}: {exc}"
+                self.research.outcome.notes.append(
+                    f"research stages failed before drafting: {research_failure}. "
+                    "The manuscript cannot be reported as a completed study."
+                )
+            self.changelog.log_event("RESEARCH_BEGIN", brief.task_id, {
+                "article_type": brief.article_type.value,
+                "plan_validated": bool(self.research.outcome.plan
+                                       and self.research.outcome.plan.validated),
+                "sources": len(self.research.outcome.library.records),
+                "experiments": len(self.research.outcome.runs),
+                "failure": research_failure,
+            })
+
         previous_score: Optional[float] = None
         stall_count = 0
         tokens_total = 0
@@ -218,9 +280,40 @@ class Orchestrator:
                 break
 
         final_score = records[-1].score if records else 0.0
+
+        # -- research completion: code verification, review loop, gate -----
+        quality_status = ""
+        research_payload: Dict[str, Any] = {}
+        if self.research is not None:
+            try:
+                draft = self.research.complete(draft)
+                store.write_master_draft(draft)
+            except Exception as exc:  # noqa: BLE001 - report, never mask
+                self.research.outcome.notes.append(
+                    f"research completion failed: {type(exc).__name__}: {exc}. "
+                    "The manuscript is unverified."
+                )
+                quality_status = "incomplete_or_unverified"
+            else:
+                quality_status = self.research.outcome.quality_status
+            research_payload = self.research.to_dict()
+            self.changelog.log_event("RESEARCH_GATE", brief.task_id, {
+                "quality_status": quality_status or "not_computed",
+                "gate_reasons": (self.research.outcome.gate.reasons[:8]
+                                 if self.research.outcome.gate else ["gate not computed"]),
+                "critical_failures": (len(self.research.outcome.gate.critical_failures)
+                                      if self.research.outcome.gate else 0),
+                "checks": (self.research.outcome.validation.summary()
+                           if self.research.outcome.validation else {}),
+                "review_blocking": (len(self.research.outcome.review.blocking())
+                                    if self.research.outcome.review else 0),
+                "report": os.path.join(store.root, "research", "report.md"),
+            })
+
         final_gate = verify_draft(draft, brief)
         status = self._final_status(final_score, final_gate, records,
-                                    score_target=self.config.score_target)
+                                    score_target=self.config.score_target,
+                                    quality_status=quality_status)
 
         failures = [
             f"{report.agent_id}: {note}"
@@ -258,6 +351,7 @@ class Orchestrator:
             "final_draft_gate": "PASS" if final_gate.ok else f"FAIL ({len(final_gate.blockers)} blockers)",
             "master_draft": os.path.join(store.root, "master_draft.md"),
             "open_findings": len(store.open_findings),
+            "quality_status": quality_status or "not_applicable",
         })
 
         self.events.emit(EventType.RUN_END, task_id=brief.task_id, status=status,
@@ -267,12 +361,22 @@ class Orchestrator:
                          draft_version=draft.version,
                          stop_reason=stop_reason or "loop exited",
                          open_findings=len(store.open_findings),
-                         gate_ok=final_gate.ok)
+                         gate_ok=final_gate.ok,
+                         quality_status=quality_status,
+                         research_notes=(self.research.outcome.notes[:8]
+                                         if self.research is not None else []))
+
+        if quality_status and quality_status != "ready_for_final_review":
+            stop_reason = (
+                f"{stop_reason or 'loop exited'}; research validation status: "
+                f"{quality_status.replace('_', ' ')} (see research/report.md)"
+            )
 
         return RunResult(
             task_id=brief.task_id, status=status, iterations=records, gate=final_gate,
             final_score=final_score, final_draft=draft, workspace=store.root,
             tokens_total=tokens_total, stop_reason=stop_reason or "loop exited",
+            research=research_payload, quality_status=quality_status,
         )
 
     # -- one iteration ----------------------------------------------------
@@ -298,6 +402,7 @@ class Orchestrator:
                 iteration=iteration,
                 draft_required=agent.draft_required,
                 peer_reports=reports,
+                research_context=self._research_context(),
             )
             evicted.extend(packet.evicted)
             store.write_text(iteration, f"context-{agent.agent_id}.txt", packet.text)
@@ -429,6 +534,17 @@ class Orchestrator:
         return record, draft
 
     # -- helpers ----------------------------------------------------------
+    def _research_context(self) -> str:
+        """Plan, verified sources and executed results for the agent packet."""
+        if self.research is None:
+            return ""
+        try:
+            return self.research.context_block(max_tokens=1400)
+        except Exception as exc:  # noqa: BLE001 - context assembly must not abort a run
+            self.research.outcome.notes.append(
+                f"research context unavailable: {type(exc).__name__}: {exc}")
+            return ""
+
     def _emit_agent_done(self, agent, report: AgentReport, iteration: int, task_id: str,
                          evicted_count: int, context_tokens: int) -> None:
         """Report one agent's completion with the numbers a dashboard cares about."""
@@ -485,9 +601,17 @@ class Orchestrator:
 
     @staticmethod
     def _final_status(score: float, gate: GateResult, records: List[IterationRecord],
-                      score_target: float = 0.85) -> str:
+                      score_target: float = 0.85, quality_status: str = "") -> str:
+        """Writing quality can never overrule a research-integrity failure.
+
+        ``PASS`` means the article passed the writing gate *and* the research gate
+        reached "ready for final review". Anything else is ``NEEDS_HUMAN``; an
+        unverified or incomplete manuscript is never reported as complete.
+        """
         if gate.routed_back:
             return "NEEDS_HUMAN"
         if any(r.status == AgentStatus.DEGRADED for record in records for r in record.reports):
+            return "NEEDS_HUMAN"
+        if quality_status and quality_status != "ready_for_final_review":
             return "NEEDS_HUMAN"
         return "PASS" if score >= score_target else "NEEDS_HUMAN"

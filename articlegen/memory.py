@@ -406,7 +406,8 @@ class MemoryStore:
     def build_packet(self, *, agent_id: str, brief, draft: Draft, rules_digest: str,
                      budget: TokenBudget, iteration: int,
                      draft_required: bool,
-                     peer_reports: Optional[List[AgentReport]] = None) -> AssembledContext:
+                     peer_reports: Optional[List[AgentReport]] = None,
+                     research_context: str = "") -> AssembledContext:
         """Assemble the bounded context for one agent call."""
         agent_budget = budget.agent(agent_id)
         draft_key = "master_draft"
@@ -436,16 +437,39 @@ class MemoryStore:
                 "overlaid. Review/merge these bodies, not the old empty outline. "
                 "It is advisory; only the Synthesizer may publish a new master."
             )
+        if research_context:
+            header += (
+                "\nresearch_mode: the packet includes a validated research plan and "
+                "the only citable sources / reportable results. Do not invent evidence."
+            )
         blocks = [
             Block(1, "system_rules_digest", rules_digest, required=True),
             Block(2, "task_brief", outline_block(brief), required=True),
-            Block(3, draft_key, draft_text_fn(),
-                  required=draft_required),
-            Block(4, "open_findings", findings_block(self.open_findings), required=False),
-            Block(5, "rolling_history", self.rolling.render() or "no prior iterations",
+            Block(3, "research_plan_and_evidence", research_context, required=False),
+            Block(4, draft_key, draft_text_fn(), required=draft_required),
+            Block(5, "open_findings", findings_block(self.open_findings), required=False),
+            Block(6, "rolling_history", self.rolling.render() or "no prior iterations",
                   required=False),
         ]
         return assemble(blocks, budget, header=header)
+
+
+    # -- research artefacts -------------------------------------------------
+    def research_dir(self) -> str:
+        path = os.path.join(self.root, "research")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def write_research_json(self, name: str, payload: Dict[str, Any]) -> str:
+        path = os.path.join(self.research_dir(), name)
+        _atomic_write_json(path, payload)
+        return path
+
+    def write_research_text(self, name: str, content: str) -> str:
+        path = os.path.join(self.research_dir(), name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return path
 
 
 def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:

@@ -36,6 +36,58 @@ STATE_ICONS: Dict[str, str] = {
 }
 
 
+#: Human labels for the research workflow states shown in the dashboard.
+RESEARCH_STAGE_LABELS: Dict[str, str] = {
+    "plan": "Research plan",
+    "sources": "Sources retrieved / verified",
+    "experiment": "Experiments executed",
+    "code_execution": "Displayed code executed",
+    "validation": "Deterministic validation",
+    "peer_review": "Scientific peer review",
+    "quality_gate": "Quality gate",
+}
+
+GATE_LABELS: Dict[str, str] = {
+    "ready_for_final_review": "✅ Ready for final review",
+    "needs_revision": "🟠 Needs revision",
+    "incomplete_or_unverified": "🔴 Incomplete or unverified",
+}
+
+
+@dataclass
+class ResearchStageView:
+    """One research stage: what ran, and what it concluded."""
+
+    stage: str
+    label: str = ""
+    status: str = "pending"
+    summary: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def icon(self) -> str:
+        return {
+            "pending": "⚪", "running": "🔵", "done": "🟢", "ok": "🟢",
+            "failed": "🔴", "incomplete": "🟠", "unverified": "🟠",
+        }.get(self.status, "⚪")
+
+    def as_row(self) -> Dict[str, Any]:
+        return {"Stage": self.label or self.stage,
+                "State": f"{self.icon} {self.status}",
+                "Summary": self.summary}
+
+
+@dataclass
+class ResearchIssueView:
+    issue_id: str
+    severity: str
+    dimension: str
+    section: str
+    claim: str
+    correction: str
+    status: str
+
+
 @dataclass
 class AgentView:
     """One row of the execution tracker."""
@@ -137,6 +189,20 @@ class TrackerState:
         self.iterations: List[IterationView] = []
         self.timeline: List[Dict[str, Any]] = []
         self.events: List[PipelineEvent] = []
+        # -- research state (empty for a classic article run) --------------
+        self.research_stages: Dict[str, ResearchStageView] = {}
+        self.research_gate: str = ""
+        self.research_gate_label: str = ""
+        self.research_states: Dict[str, Any] = {}
+        self.research_reasons: List[str] = []
+        self.research_notes: List[str] = []
+        self.research_issues: List[ResearchIssueView] = []
+        self.research_counts: Dict[str, Any] = {}
+        self.plan_summary: Dict[str, Any] = {}
+        self.sources_summary: Dict[str, Any] = {}
+        self.experiment_rows: List[Dict[str, Any]] = []
+        self.validation_counts: Dict[str, int] = {}
+        self.validation_failures: List[Dict[str, str]] = []
 
     # -- ingestion --------------------------------------------------------
     def consume(self, event: PipelineEvent) -> None:
@@ -242,6 +308,70 @@ class TrackerState:
         self.final_score = float(payload.get("score", 0.0))
         self.tokens_total += int(payload.get("tokens_total", 0))
 
+    def _on_research_stage(self, event: PipelineEvent) -> None:
+        """Track plan, sources, experiment, review and gate progress."""
+        payload = dict(event.payload)
+        stage = str(payload.pop("stage", "") or "stage")
+        status = str(payload.pop("status", "") or "")
+        summary = str(payload.pop("summary", "") or event.message)
+        view = self.research_stages.get(stage) or ResearchStageView(stage=stage)
+        view.label = RESEARCH_STAGE_LABELS.get(stage, view.label or stage)
+        view.status = status or view.status
+        view.summary = summary or view.summary
+        view.details.update(payload)
+        self.research_stages[stage] = view
+        self.research_counts[stage] = view.status
+
+        if stage == "quality_gate":
+            self.research_gate = status
+            self.research_gate_label = GATE_LABELS.get(status, status)
+            self.research_reasons = list(payload.get("reasons") or [])
+            self.research_states = dict(payload.get("states") or {})
+        elif stage == "validation":
+            self.validation_counts = dict(payload.get("counts") or {})
+            self.validation_failures = [
+                {key: str(item.get(key, "")) for key in
+                 ("check", "severity", "details", "effect")}
+                for item in (payload.get("failing") or []) if isinstance(item, dict)
+            ]
+        elif stage == "sources":
+            self.sources_summary = {key: payload.get(key) for key in
+                                    ("records", "verified", "user_provided",
+                                     "unverified", "provider", "queries")}
+        elif stage == "plan":
+            self.plan_summary = {
+                "article_type": payload.get("article_type", ""),
+                "contribution_type": payload.get("contribution_type", ""),
+                "research_question": payload.get("research_question", ""),
+                "contribution": payload.get("contribution", ""),
+                "decision": payload.get("decision", ""),
+                "validated": payload.get("validated", False),
+                "missing_elements": list(payload.get("missing_elements") or []),
+                "decision_reasons": list(payload.get("decision_reasons") or []),
+            }
+        elif stage == "experiment":
+            row = {
+                "Experiment": str(payload.get("experiment_id", "")),
+                "State": str(payload.get("status", "")),
+                "Exit": str(payload.get("exit_code", "-")),
+                "Tests": f"{payload.get('tests_passed', 0)}/{payload.get('tests_run', 0)}",
+            }
+            self.experiment_rows.append(row)
+        elif stage == "peer_review":
+            issues = payload.get("issues") or []
+            if issues:
+                self.research_issues = [
+                    ResearchIssueView(
+                        issue_id=str(item.get("issue_id", "")),
+                        severity=str(item.get("severity", "")),
+                        dimension=str(item.get("dimension", "")),
+                        section=str(item.get("section", "")),
+                        claim=str(item.get("claim", "")),
+                        correction=str(item.get("correction", "")),
+                        status=str(item.get("status", "open")),
+                    ) for item in issues if isinstance(item, dict)
+                ]
+
     def _on_run_end(self, event: PipelineEvent) -> None:
         payload = event.payload
         self.status = "route_back" if payload.get("status") == "ROUTE_BACK" else "done"
@@ -249,6 +379,13 @@ class TrackerState:
         self.stop_reason = str(payload.get("stop_reason") or event.message)
         self.final_score = float(payload.get("final_score", self.final_score))
         self.tokens_total = int(payload.get("tokens_total", self.tokens_total))
+        quality_status = str(payload.get("quality_status") or "")
+        if quality_status:
+            self.research_gate = self.research_gate or quality_status
+            self.research_gate_label = (
+                self.research_gate_label or GATE_LABELS.get(quality_status, quality_status)
+            )
+        self.research_notes = list(payload.get("research_notes") or self.research_notes)
 
     # -- derived views ----------------------------------------------------
     def agents(self) -> List[AgentView]:
@@ -304,14 +441,51 @@ class TrackerState:
             "route_back": "Routed back",
         }.get(self.status, self.status)
 
+    def research_rows(self) -> List[Dict[str, Any]]:
+        order = ["plan", "sources", "experiment", "code_execution", "validation",
+                 "peer_review", "quality_gate"]
+        views = [self.research_stages[stage] for stage in order
+                 if stage in self.research_stages]
+        views += [view for key, view in self.research_stages.items()
+                  if key not in order]
+        return [view.as_row() for view in views]
+
+    def research_state_rows(self) -> List[Dict[str, str]]:
+        """Workflow states reported by the gate, with 'not required' kept distinct."""
+        rows: List[Dict[str, str]] = []
+        labels = {
+            "draft_generated": "Draft generated",
+            "plan_validated": "Research plan validated",
+            "sources_retrieved": "Sources retrieved",
+            "sources_verified": "Sources verified",
+            "experiments_executed": "Experiments executed",
+            "tests_passed": "Tests passed",
+            "technical_checks_completed": "Technical checks completed",
+            "peer_review_completed": "Peer review completed",
+            "revision_completed": "Revision completed",
+            "ready_for_human_review": "Ready for human review",
+        }
+        for key, label in labels.items():
+            if key not in self.research_states:
+                continue
+            value = bool(self.research_states.get(key))
+            rows.append({"State": label, "Reached": "yes" if value else "no"})
+        return rows
+
+    @property
+    def has_research(self) -> bool:
+        return bool(self.research_stages)
+
     def headline(self) -> str:
         if self.status == "route_back":
             if any(issue.get("category") == "provider" for issue in self.route_back_issues):
                 return f"⛔ No draft generated — {self.stop_reason}"
             return f"⛔ Routed back at the input gate — {self.stop_reason}"
         if self.status == "done":
-            return (f"✅ {self.result_status} — score {self.final_score:.4f} "
-                    f"({self.stop_reason})")
+            gate = f" · research: {self.research_gate_label}" if self.research_gate else ""
+            icon = "✅" if self.result_status == "PASS" else "⚠️"
+            return (f"{icon} {self.result_status} — score {self.final_score:.4f}"
+                    f"{gate} ({self.stop_reason})")
         if self.status == "running" and self.current_iteration:
             running = [v.label for v in self.agents() if v.state == "running"]
             who = running[0] if running else "between agents"
