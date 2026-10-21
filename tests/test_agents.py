@@ -222,6 +222,34 @@ def test_mechanical_polish_converges_without_generating_text():
     assert polished.count("\n\n") >= body.count("\n\n")
 
 
+def test_mechanical_polish_splits_semicolon_sentences_without_recursing():
+    """Long semicolon-joined clauses used to RecursionError: the ';' stayed on
+    the remainder, so the next call cut at index 0 and never shrank."""
+    from articlegen.agents.writer import apply_mechanical_polish
+
+    def clause(prefix: str, n: int) -> str:
+        return " ".join(f"{prefix}{i}" for i in range(n))
+
+    body = clause("a", 20) + "; " + clause("b", 40) + "."
+    polished, operations = apply_mechanical_polish(body)
+    again, _ = apply_mechanical_polish(polished)
+
+    assert "split_sentences" in operations
+    assert again == polished
+    assert polished.startswith("a0 ")
+    assert "B0" in polished
+    assert ";" not in polished
+
+    # Both halves still over the word ceiling: must split more than once.
+    chained = clause("a", 40) + "; " + clause("b", 40) + "; " + clause("c", 40) + "."
+    polished, operations = apply_mechanical_polish(chained)
+    again, _ = apply_mechanical_polish(polished)
+    assert "split_sentences" in operations
+    assert again == polished
+    assert polished.count(".") >= 3
+    assert ";" not in polished
+
+
 def test_writer_delta_block_hides_unchanged_sections(valid_brief):
     from articlegen.memory import writer_delta_block
     draft = Draft.from_brief(valid_brief)

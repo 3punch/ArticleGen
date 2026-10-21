@@ -56,22 +56,28 @@ def _split_one_long_sentence(sentence: str, max_words: int) -> str:
         return sentence
     candidates: List[int] = []
     for pattern in SPLIT_CONNECTOR_RES:
-        candidates.extend(m.start() for m in pattern.finditer(sentence))
+        # A match at index 0 cannot yield a smaller remainder: the next call
+        # would cut at 0 again and recurse forever.
+        candidates.extend(m.start() for m in pattern.finditer(sentence) if m.start() > 0)
     if not candidates:
         return sentence
     middle = len(sentence) // 2
     cut = min(candidates, key=lambda pos: abs(pos - middle))
     head = sentence[:cut].rstrip()
     rest = sentence[cut:].lstrip()
-    # The separator stays on its side; both halves keep full sentences.
-    head = head.rstrip()
-    if rest and rest[0] in ",":
+    # Drop the connector ("," / ";") so it is not re-matched on the remainder.
+    if rest and rest[0] in ",;":
         rest = rest[1:].lstrip()
-    if head and head[-1] not in ".!?":
+    if not head or not rest:
+        return sentence
+    if head[-1] not in ".!?":
         head += "."
     rest = rest[:1].upper() + rest[1:]
-    if rest and rest[-1] not in ".!?":
+    if rest[-1] not in ".!?":
         rest += "."
+    # Recurse only when both halves are strictly smaller than the input.
+    if len(head.split()) >= len(words) or len(rest.split()) >= len(words):
+        return sentence
     return " ".join([_split_one_long_sentence(head, max_words),
                      _split_one_long_sentence(rest, max_words)])
 
