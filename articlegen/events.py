@@ -23,6 +23,9 @@ class EventType(str, Enum):
     ITERATION_START = "iteration_start"
     ITERATION_DONE = "iteration_done"
     DRAFT_UPDATED = "draft_updated"
+    #: A research stage (plan, sources, experiment, code check, review, gate)
+    #: changed state. The payload carries the stage name and its outcome.
+    RESEARCH_STAGE = "research_stage"
     RUN_END = "run_end"
     LOG = "log"
 

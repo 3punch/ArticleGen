@@ -88,6 +88,37 @@ with st.sidebar:
     )
     st.session_state.score_target = score_target
 
+    st.subheader("Research mode")
+    st.caption("Research mode adds a validated research plan, verified sources, code "
+               "and experiment execution, a peer-review revision loop and a "
+               "three-outcome quality gate. 'General' keeps the classic workflow.")
+    article_type = st.selectbox(
+        "Article type",
+        ["general", "educational", "conceptual", "empirical", "computational",
+         "theoretical", "methods", "systematic_review", "narrative_review"],
+        help="Sets the required sections and which checks apply. Research types "
+             "activate the evidence pipeline.",
+    )
+    citation_style = st.selectbox("Citation style", ["apa", "ieee", "vancouver", "plain"])
+    review_iterations = st.slider("Review/revision iterations", 0, 3, 1)
+    execute_experiments = st.checkbox(
+        "Execute planned experiments", value=True,
+        help="Runs the plan's code in an isolated subprocess and records results. "
+             "Without execution the run cannot be reported as a completed study.",
+    )
+    source_retrieval = st.selectbox(
+        "Source retrieval", ["auto", "crossref", "user", "none"],
+        help="'auto' queries Crossref. 'user' uses only sources supplied in the brief. "
+             "'none' records that no bibliography can be verified.",
+    )
+    st.session_state["research_settings"] = {
+        "article_type": article_type,
+        "citation_style": citation_style,
+        "review_iterations": int(review_iterations),
+        "execute_experiments": bool(execute_experiments),
+        "source_retrieval": source_retrieval,
+    }
+
     st.subheader("Paths")
     workspace = st.text_input("Workspace", st.session_state.workspace)
     changelog_path = st.text_input("Change log", st.session_state.changelog_path)
@@ -139,8 +170,8 @@ with st.sidebar:
 
 # -- tabs -----------------------------------------------------------------
 
-tab_brief, tab_exec, tab_scores, tab_draft, tab_log = st.tabs(
-    ["📋 Brief", "⚡ Execution", "📈 Scores", "📄 Draft", "📜 Change Log"]
+tab_brief, tab_exec, tab_research, tab_scores, tab_draft, tab_log = st.tabs(
+    ["📋 Brief", "⚡ Execution", "🔬 Research", "📈 Scores", "📄 Draft", "📜 Change Log"]
 )
 
 # -- Tab 1: brief + run ---------------------------------------------------
@@ -199,6 +230,33 @@ with tab_brief:
             "\n".join(loaded.get("constraints") or []),
             height=80,
         )
+        research_cols = st.columns(2)
+        research_question = research_cols[0].text_input(
+            "Research question (optional)",
+            loaded.get("research_question", ""),
+            help="A precise, answerable question. Required in practice for research "
+                 "article types; the planner will otherwise report the gap.",
+        )
+        venue = research_cols[1].text_input("Target venue (optional)",
+                                           loaded.get("venue", ""))
+        contribution_type = st.selectbox(
+            "Contribution type",
+            ["", "novel_theory", "novel_empirical", "novel_method", "novel_algorithm",
+             "synthesis", "replication", "routine_implementation", "educational",
+             "conceptual"],
+            index=0,
+            help="Novelty is never assumed: a routine implementation will be reframed "
+                 "as a replication unless the literature search supports the claim.",
+        )
+        requirements_cols = st.columns(2)
+        requires_experiments = requirements_cols[0].checkbox(
+            "This article requires experiments",
+            bool(loaded.get("requires_experiments", False)),
+        )
+        novelty_claim = requirements_cols[1].checkbox(
+            "Explicit novelty claim requested",
+            bool(loaded.get("novelty_claim", False)),
+        )
         sections_text = st.text_area(
             "Sections  —  `id | Title | purpose | word_target`",
             loaded.get("_sections_text")
@@ -215,6 +273,16 @@ with tab_brief:
             mode=mode, tone=tone, target_words=int(target_words),
             sections_text=sections_text, constraints_text=constraints_text,
             requires_citations=requires_citations,
+            article_type=st.session_state["research_settings"]["article_type"],
+            citation_style=st.session_state["research_settings"]["citation_style"],
+            research_question=research_question,
+            contribution_type=contribution_type,
+            venue=venue,
+            requires_experiments=requires_experiments,
+            execute_experiments=st.session_state["research_settings"]["execute_experiments"],
+            review_iterations=st.session_state["research_settings"]["review_iterations"],
+            source_retrieval=st.session_state["research_settings"]["source_retrieval"],
+            novelty_claim=novelty_claim,
         )
         st.session_state["brief_data"] = data
         brief, gate, parse_errors = builder.validate(data)
@@ -247,6 +315,16 @@ with tab_brief:
         mode=mode, tone=tone, target_words=int(target_words),
         sections_text=sections_text, constraints_text=constraints_text,
         requires_citations=requires_citations,
+        article_type=st.session_state["research_settings"]["article_type"],
+        citation_style=st.session_state["research_settings"]["citation_style"],
+        research_question=research_question,
+        contribution_type=contribution_type,
+        venue=venue,
+        requires_experiments=requires_experiments,
+        execute_experiments=st.session_state["research_settings"]["execute_experiments"],
+        review_iterations=st.session_state["research_settings"]["review_iterations"],
+        source_retrieval=st.session_state["research_settings"]["source_retrieval"],
+        novelty_claim=novelty_claim,
     )
     form_drifted = validated_brief is not None and current_brief != validated_brief
 
@@ -311,6 +389,11 @@ with tab_brief:
             "provider": provider,
             "workspace": workspace,
             "changelog_path": changelog_path,
+            "research": True,
+            "source_retrieval": st.session_state["research_settings"]["source_retrieval"],
+            "review_iterations": st.session_state["research_settings"]["review_iterations"],
+            "execute_experiments":
+                st.session_state["research_settings"]["execute_experiments"],
         })
         # Build LLM client from sidebar inputs (takes precedence over env vars)
         llm_client = resolve_client(
@@ -340,6 +423,8 @@ with tab_brief:
             if result.final_draft and any(s.body.strip() for s in result.final_draft.sections)
             else ""
         )
+        research = result.research or {}
+        gate = research.get("quality_gate") or {}
         st.session_state["run_meta"] = {
             "status": result.status,
             "stop_reason": result.stop_reason,
@@ -347,13 +432,19 @@ with tab_brief:
             "iterations": len(result.iterations),
             "tokens_total": result.tokens_total,
             "workspace": result.workspace,
+            "quality_status": result.quality_status,
+            "quality_label": gate.get("label", ""),
+            "research_report": os.path.join(result.workspace, "research", "report.md")
+            if result.workspace else "",
         }
+        st.session_state["research_report_markdown"] = research.get("markdown", "")
         render.render_tracker(live_container, tracker, score_target)
         if tracker.status == "route_back":
             render.render_route_back(route_back_container, tracker)
         if result.status == "PASS":
             st.success(f"Run finished — {result.status}. Switch to the "
-                       f"**Execution**, **Scores** and **Draft** tabs for detail.")
+                       f"**Execution**, **Research**, **Scores** and **Draft** tabs "
+                       f"for detail.")
         else:
             st.error(f"Run finished — {result.status}: {result.stop_reason}")
 
@@ -384,7 +475,30 @@ with tab_exec:
         st.subheader("Event timeline")
         render.render_timeline(exec_timeline, tracker)
 
-# -- Tab 3: scores --------------------------------------------------------
+# -- Tab 3: research ------------------------------------------------------
+
+with tab_research:
+    st.header("Research integrity")
+    tracker = st.session_state["tracker"]
+    render.render_research(st.container(), tracker)
+
+    report_markdown = st.session_state.get("research_report_markdown") or ""
+    if report_markdown:
+        st.subheader("Validated export")
+        st.caption("The manuscript with its integrity appendix: status, plan, verified "
+                   "sources, executed experiments, failed checks and unresolved review "
+                   "issues. Generated from recorded artefacts, not model text.")
+        st.download_button(
+            "⬇️ Download article + integrity appendix (.md)",
+            data=report_markdown,
+            file_name=f"{tracker.task_id or 'article'}_with_appendix.md",
+            mime="text/markdown",
+            width="stretch",
+        )
+        with st.expander("Preview appendix", expanded=False):
+            st.markdown(report_markdown[:20000])
+
+# -- Tab 4: scores --------------------------------------------------------
 
 with tab_scores:
     st.header("Score dashboard")
@@ -414,7 +528,7 @@ with tab_scores:
                 f"stop reason: {tracker.stop_reason or 'n/a'}"
             )
 
-# -- Tab 4: draft ---------------------------------------------------------
+# -- Tab 5: draft ---------------------------------------------------------
 
 with tab_draft:
     st.header("Master draft")
@@ -428,6 +542,15 @@ with tab_draft:
     else:
         if meta.get("status") != "PASS":
             st.warning(f"This draft needs review: {meta.get('stop_reason', 'quality target not met')}")
+        quality_status = meta.get("quality_status") or ""
+        if quality_status == "ready_for_final_review":
+            st.success("Research validation: Ready for final review — automated checks "
+                       "passed. This does not guarantee acceptance or correctness.")
+        elif quality_status == "needs_revision":
+            st.warning("Research validation: Needs revision — unresolved findings remain.")
+        elif quality_status:
+            st.error("Research validation: Incomplete or unverified — required evidence "
+                     "or execution is missing. Do not present this as a completed study.")
         toolbar = st.columns([2, 1, 1, 2])
         toolbar[0].metric("Words", len(markdown.split()))
         toolbar[1].metric("Score", f"{meta.get('final_score', 0):.4f}")
@@ -455,7 +578,7 @@ with tab_draft:
                            file_name=f"{filename[:-3]}_run.json", mime="application/json",
                            width="stretch")
 
-# -- Tab 5: change log ----------------------------------------------------
+# -- Tab 6: change log ----------------------------------------------------
 
 with tab_log:
     st.header("Change log")

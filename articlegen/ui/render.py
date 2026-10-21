@@ -141,6 +141,118 @@ def render_route_back(container, tracker: TrackerState) -> None:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
+def render_research(container, tracker: TrackerState) -> None:
+    """Concise research summary with diagnostics behind expanders.
+
+    The top of the tab answers "can this manuscript be trusted as described?" before
+    it shows any detail; nothing here claims scientific correctness.
+    """
+    with container:
+        if not tracker.has_research:
+            st.info("No research stages ran for this article. Research mode is only "
+                    "enabled for research article types and research briefs.")
+            return
+
+        if tracker.research_gate:
+            label = tracker.research_gate_label or tracker.research_gate
+            if tracker.research_gate == "ready_for_final_review":
+                st.success(f"{label} — every required automated check passed. This is "
+                           "not a guarantee of acceptance or of scientific correctness.")
+            elif tracker.research_gate == "needs_revision":
+                st.warning(f"{label} — unresolved issues remain; the draft must be "
+                           "labelled as needing revision.")
+            else:
+                st.error(f"{label} — required evidence, execution or validation is "
+                         "missing. Treat the manuscript as a proposal or preliminary "
+                         "draft.")
+        else:
+            st.info("No quality-gate verdict was recorded for this run.")
+
+        st.subheader("Workflow states")
+        state_rows = tracker.research_state_rows()
+        if state_rows:
+            st.dataframe(pd.DataFrame(state_rows), width="stretch", hide_index=True)
+        else:
+            st.caption("The gate did not report workflow states.")
+
+        st.subheader("Research stages")
+        rows = tracker.research_rows()
+        if rows:
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        else:
+            st.caption("No stage events were emitted.")
+
+        plan = tracker.plan_summary
+        if plan:
+            with st.expander("Research plan and contribution", expanded=False):
+                st.markdown(
+                    f"**Article type:** {plan.get('article_type') or '-'}  \n"
+                    f"**Contribution type:** {plan.get('contribution_type') or '-'}  \n"
+                    f"**Plan validated:** {'yes' if plan.get('validated') else 'no'}  \n"
+                    f"**Decision:** {plan.get('decision') or '-'}"
+                )
+                if plan.get("research_question"):
+                    st.markdown(f"**Research question:** {plan['research_question']}")
+                if plan.get("contribution"):
+                    st.markdown(f"**Contribution:** {plan['contribution']}")
+                if plan.get("missing_elements"):
+                    st.warning("Plan elements missing: "
+                               + ", ".join(plan["missing_elements"]))
+                for reason in plan.get("decision_reasons") or []:
+                    st.caption(f"• {reason}")
+
+        sources = tracker.sources_summary
+        if sources:
+            with st.expander("Sources and verification", expanded=False):
+                st.markdown(
+                    f"**Records:** {sources.get('records', 0)}  \n"
+                    f"**Index-verified:** {sources.get('verified', 0)}  \n"
+                    f"**User-provided:** {sources.get('user_provided', 0)}  \n"
+                    f"**Retrieval provider:** {sources.get('provider') or 'none'} "
+                    f"({sources.get('queries', 0)} queries)"
+                )
+                st.caption("Only verified records are citable; the bibliography is "
+                           "generated from them, never from prose.")
+
+        if tracker.experiment_rows:
+            with st.expander("Experiment execution", expanded=False):
+                st.dataframe(pd.DataFrame(tracker.experiment_rows), width="stretch",
+                             hide_index=True)
+
+        if tracker.validation_counts:
+            with st.expander("Deterministic validation", expanded=False):
+                counts = tracker.validation_counts
+                st.markdown(
+                    f"**Passed:** {counts.get('pass', 0)} · "
+                    f"**Failed:** {counts.get('fail', 0)} · "
+                    f"**Unverified:** {counts.get('unverified', 0)} · "
+                    f"**Not applicable:** {counts.get('not_applicable', 0)}"
+                )
+                if tracker.validation_failures:
+                    st.dataframe(pd.DataFrame(tracker.validation_failures),
+                                 width="stretch", hide_index=True)
+
+        if tracker.research_issues:
+            with st.expander("Reviewer findings by severity", expanded=False):
+                severity_order = {"critical": 0, "major": 1, "moderate": 2, "minor": 3}
+                issues = sorted(tracker.research_issues,
+                                key=lambda i: severity_order.get(i.severity, 9))
+                st.dataframe(pd.DataFrame([{
+                    "id": i.issue_id, "severity": i.severity, "dimension": i.dimension,
+                    "section": i.section, "claim": i.claim, "correction": i.correction,
+                    "status": i.status,
+                } for i in issues]), width="stretch", hide_index=True)
+
+        if tracker.research_reasons:
+            with st.expander("Unresolved issues blocking the gate", expanded=True):
+                for reason in tracker.research_reasons[:15]:
+                    st.markdown(f"- {reason}")
+        if tracker.research_notes:
+            with st.expander("Research pipeline notes", expanded=False):
+                for note in tracker.research_notes[:15]:
+                    st.markdown(f"- {note}")
+
+
 def export_payload(draft_markdown: str, tracker: TrackerState,
                    result_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Bundle the draft, scores and stop reason into one exportable dict."""
@@ -153,5 +265,13 @@ def export_payload(draft_markdown: str, tracker: TrackerState,
         "iterations": tracker.iteration_rows(),
         "agents": tracker.agent_rows(),
         "meta": result_meta or {},
+        "research": {
+            "quality_status": tracker.research_gate,
+            "quality_label": tracker.research_gate_label,
+            "states": tracker.research_states,
+            "stages": tracker.research_rows(),
+            "unresolved": list(tracker.research_reasons),
+            "notes": list(tracker.research_notes),
+        } if tracker.has_research else {},
         "markdown": draft_markdown,
     }

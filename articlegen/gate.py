@@ -11,6 +11,7 @@ import re
 from typing import Callable, Dict, List, Tuple
 from urllib.parse import urlparse
 
+from .research.models import profile_for
 from .models import (
     TASK_ID_RE,
     Brief,
@@ -316,6 +317,46 @@ def _check_citations(text: str, issues: List[Finding]) -> None:
             ))
 
 
+def _check_research_inputs(brief: Brief, issues: List[Finding]) -> None:
+    """Input-level sanity for research briefs.
+
+    This does not judge the research - that is the plan and validation stages'
+    job - but an input that cannot possibly lead to a complete study is worth
+    catching before any tokens are spent. Non-research briefs are untouched.
+    """
+    if not brief.research_enabled:
+        return
+    profile = profile_for(brief.article_type)
+    if brief.article_type.is_research and not brief.section_ids:
+        issues.append(_finding(
+            "brief", Severity.BLOCKER, "research", "sections",
+            "a research brief needs an outline so the required sections can be checked",
+            "Add the sections the article type requires.",
+        ))
+    if profile.requires_search_strategy and brief.source_retrieval == "none":
+        issues.append(_finding(
+            "brief", Severity.MAJOR, "research", "source_retrieval",
+            "a systematic review cannot proceed with source retrieval disabled",
+            "Enable retrieval, or change the article type to a narrative review.",
+        ))
+    if (profile.requires_experiments or brief.requires_experiments) \
+            and brief.execute_experiments is False:
+        issues.append(_finding(
+            "brief", Severity.MAJOR, "research", "execute_experiments",
+            "the brief requires experiments but execution is disabled; the run can "
+            "only produce an incomplete or unverified manuscript",
+            "Enable experiment execution, or remove the requirement and reframe the "
+            "article type.",
+        ))
+    if brief.novelty_claim:
+        issues.append(_finding(
+            "brief", Severity.NOTE, "research", "novelty_claim",
+            "a novelty claim was requested explicitly; the literature search must "
+            "support it or the plan will be narrowed",
+            "Expect the plan stage to reframe the contribution if no gap is verified.",
+        ))
+
+
 def verify_brief(brief: Brief) -> GateResult:
     """Validate the incoming task input. Returns a routing decision."""
     issues: List[Finding] = []
@@ -333,6 +374,8 @@ def verify_brief(brief: Brief) -> GateResult:
     checks.append("markdown_formatting")
     checks.append("code_blocks")
     checks.append("placeholders")
+    _check_research_inputs(brief, issues)
+    checks.append("research_inputs")
 
     blockers = [i for i in issues if i.severity == Severity.BLOCKER]
     routed_back = bool(blockers)

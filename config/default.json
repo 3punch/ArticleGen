@@ -5,5 +5,13 @@
   "stall_window": 2,
   "provider": "auto",
   "workspace": "runs",
-  "changelog_path": "change_log.md"
+  "changelog_path": "change_log.md",
+  "research": true,
+  "model_planning": true,
+  "model_review": true,
+  "source_retrieval": "auto",
+  "max_sources": 20,
+  "review_iterations": 1,
+  "execute_experiments": true,
+  "experiment_timeout": 30
 }

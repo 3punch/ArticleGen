@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from . import __version__
 from .changelog import ChangeLog, read_jsonl
 from .gate import verify_brief
-from .models import Brief
+from .models import ArticleType, Brief, CitationStyle
 from .orchestrator import Orchestrator, OrchestratorConfig
 
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -97,6 +97,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     config_data = _load_config(args.config)
     config = OrchestratorConfig.from_dict(config_data)
+    # These two overrides rewrite the brief, not the orchestration config.
+    article_type_override: Optional[ArticleType] = None
+    citation_style_override: Optional[CitationStyle] = None
 
     if args.iterations is not None:
         config.max_iterations = args.iterations
@@ -110,8 +113,28 @@ def cmd_run(args: argparse.Namespace) -> int:
         config.workspace = args.workspace
     if args.changelog:
         config.changelog_path = args.changelog
+    if getattr(args, "no_research", False):
+        config.research = False
+    if getattr(args, "review_iterations", None) is not None:
+        config.review_iterations = args.review_iterations
+    if getattr(args, "source_retrieval", None):
+        config.source_retrieval = args.source_retrieval
+    if getattr(args, "max_sources", None) is not None:
+        config.max_sources = args.max_sources
+    if getattr(args, "experiment_timeout", None) is not None:
+        config.experiment_timeout = args.experiment_timeout
+    if getattr(args, "no_experiments", False):
+        config.execute_experiments = False
+    if getattr(args, "article_type", None):
+        article_type_override = ArticleType.parse(args.article_type)
+    if getattr(args, "citation_style", None):
+        citation_style_override = CitationStyle.parse(args.citation_style)
 
     brief = Brief.from_dict(_load_json(args.brief))
+    if article_type_override is not None:
+        brief.article_type = article_type_override
+    if citation_style_override is not None:
+        brief.citation_style = citation_style_override
     orchestrator = Orchestrator(config, changelog=ChangeLog(config.changelog_path))
     result = orchestrator.run(brief)
 
@@ -122,6 +145,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"iterations: {len(result.iterations)}")
     print(f"tokens    : {result.tokens_total}")
     print(f"workspace : {result.workspace or '(not created; run stopped before generation)'}")
+    if result.quality_status:
+        print(f"research  : {result.quality_status}")
+        gate = (result.research or {}).get("quality_gate") or {}
+        for reason in (gate.get("reasons") or [])[:8]:
+            print(f"  - {reason}")
+        report_path = os.path.join(result.workspace, "research", "report.md")
+        if os.path.exists(report_path):
+            print(f"report    : {report_path}")
     if result.final_draft is not None:
         print(f"draft     : {os.path.join(result.workspace, 'master_draft.md')}")
     else:
@@ -258,6 +289,29 @@ def cmd_ui(args: argparse.Namespace) -> int:
         return 130
 
 
+def _add_research_options(parser: argparse.ArgumentParser) -> None:
+    """Research-stage switches shared by ``run`` and ``demo``."""
+    parser.add_argument("--article-type", default=None,
+                        choices=[t.value for t in ArticleType],
+                        help="override the brief's article type (sets required sections "
+                             "and which checks apply)")
+    parser.add_argument("--citation-style", default=None,
+                        choices=[s.value for s in CitationStyle])
+    parser.add_argument("--no-research", action="store_true",
+                        help="disable research stages (plan, sources, experiments, "
+                             "review loop, quality gate)")
+    parser.add_argument("--review-iterations", type=int, default=None,
+                        help="review -> targeted revision -> re-validate iterations")
+    parser.add_argument("--source-retrieval", default=None,
+                        choices=["auto", "crossref", "user", "static", "none"])
+    parser.add_argument("--max-sources", type=int, default=None)
+    parser.add_argument("--no-experiments", action="store_true",
+                        help="plan experiments but do not execute them (the run will be "
+                             "reported as incomplete)")
+    parser.add_argument("--experiment-timeout", type=int, default=None,
+                        help="per-experiment timeout in seconds")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="articlegen",
@@ -287,6 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--changelog", default=None)
     run.add_argument("--config", default=None)
     run.add_argument("--json", default=None, help="write the full result JSON here")
+    _add_research_options(run)
     run.set_defaults(func=cmd_run)
 
     log = sub.add_parser("log", help="summarise the machine-readable change log")
@@ -315,6 +370,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--config", default=None)
     demo.add_argument("--target", type=float, default=None)
     demo.add_argument("--json", default=None)
+    _add_research_options(demo)
     demo.set_defaults(func=cmd_demo)
 
     return parser

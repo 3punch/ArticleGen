@@ -76,7 +76,13 @@ def brief_to_text(brief: Brief) -> str:
 def build_brief_dict(*, task_id: str, title: str, objective: str, audience: str,
                      mode: str = "article", tone: str = "", target_words: int = 0,
                      sections_text: str = "", constraints_text: str = "",
-                     requires_citations: bool = False) -> Dict[str, Any]:
+                     requires_citations: bool = False,
+                     article_type: str = "general", citation_style: str = "apa",
+                     research_question: str = "", contribution_type: str = "",
+                     venue: str = "", requires_experiments: bool = False,
+                     execute_experiments: bool = True, review_iterations: int = 1,
+                     source_retrieval: str = "",
+                     novelty_claim: bool = False) -> Dict[str, Any]:
     """Assemble a brief dict from raw form values, without validating it.
 
     Deliberately permissive: the gate owns validation, and running a half-built dict
@@ -105,6 +111,18 @@ def build_brief_dict(*, task_id: str, title: str, objective: str, audience: str,
         "requires_citations": bool(requires_citations),
         "constraints": constraints,
         "sections": sections,
+        # Research settings. "general" keeps the classic article workflow unchanged;
+        # any research type activates planning, sources, execution and the quality gate.
+        "article_type": (article_type or "general").strip().lower(),
+        "citation_style": (citation_style or "apa").strip().lower(),
+        "venue": (venue or "").strip(),
+        "research_question": (research_question or "").strip(),
+        "contribution_type": (contribution_type or "").strip().lower(),
+        "requires_experiments": bool(requires_experiments),
+        "execute_experiments": bool(execute_experiments),
+        "review_iterations": max(0, int(review_iterations or 0)),
+        "source_retrieval": (source_retrieval or "").strip().lower(),
+        "novelty_claim": bool(novelty_claim),
         # Internal diagnostic consumed by validate(); preserving it here lets the
         # UI show the bad line instead of reducing every parse error to "no sections".
         "_section_parse_error": section_parse_error,
