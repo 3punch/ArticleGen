@@ -1,11 +1,14 @@
-"""Token accounting and hard context ceilings.
+"""Token accounting.
 
-Free-tier efficiency is enforced here rather than by convention. Two numbers matter:
+Token counting is kept for reporting and observability only. ArticleGen no
+longer enforces any token ceiling: context packets are never truncated or
+evicted for size, agent input and output are unbounded, and a run is never
+stopped because it spent too many tokens.
 
-* ``count_tokens`` - the single estimator used everywhere, so budget decisions and
-  the change log always agree with each other.
-* ``TokenBudget`` - hard caps. Nothing is ever passed to an agent without being
-  measured and, if necessary, truncated or evicted first.
+``count_tokens`` remains the single estimator used everywhere so the change
+log and the dashboard always agree with each other. ``truncate_to_tokens`` is
+kept as a general-purpose utility; nothing in the pipeline applies a token
+budget any more.
 """
 
 from __future__ import annotations
@@ -35,7 +38,11 @@ def count_tokens(text: str) -> int:
 
 
 def truncate_to_tokens(text: str, max_tokens: int, marker: str = "\n\n[...truncated by token budget...]") -> str:
-    """Trim ``text`` so it fits ``max_tokens``, keeping the head (highest signal)."""
+    """Trim ``text`` so it fits ``max_tokens``, keeping the head (highest signal).
+
+    Kept as a standalone utility. ArticleGen no longer applies a token budget,
+    so nothing in the pipeline truncates or evicts context for size.
+    """
     if max_tokens <= 0:
         return ""
     if count_tokens(text) <= max_tokens:
@@ -44,7 +51,7 @@ def truncate_to_tokens(text: str, max_tokens: int, marker: str = "\n\n[...trunca
     usable = max(0, max_tokens - marker_tokens)
     if usable <= 0:
         return ""
-    # Binary-search a character cut-off that satisfies the token ceiling.
+    # Binary-search a character cut-off that satisfies the token budget.
     lo, hi = 0, len(text)
     while lo < hi:
         mid = (lo + hi + 1) // 2
@@ -57,74 +64,40 @@ def truncate_to_tokens(text: str, max_tokens: int, marker: str = "\n\n[...trunca
 
 @dataclass(frozen=True)
 class AgentBudget:
-    """Per-agent ceiling on what may enter and leave a single agent call."""
+    """Per-agent settings. Agent input and output are unbounded: no caps."""
 
     agent_id: str
-    max_input_tokens: int
-    max_output_tokens: int
 
 
 @dataclass
 class TokenBudget:
-    """Global + per-agent ceilings for one run.
+    """No ceilings.
 
-    ``context_hard_cap`` is the strict threshold mentioned in the system rules:
-    any assembled context packet above it must be evicted or truncated before use.
-    ``context_soft_warn`` triggers a warning in the change log without blocking.
+    Holds per-agent settings only. Token counts are recorded for reporting;
+    they never truncate, evict, or block anything.
     """
 
-    context_hard_cap: int = 6000
-    context_soft_warn: int = 4800
-    run_token_ceiling: int = 60000
-    reserve_for_response: int = 2000
     agents: Dict[str, AgentBudget] = field(default_factory=dict)
 
     @classmethod
     def default(cls) -> "TokenBudget":
-        # Defaults tuned for minimum spend: a tighter context cap means the
-        # priority eviction never sends anything borderline to the provider,
-        # and per-agent input caps keep the repeated digest + draft blocks
-        # from dominating the bill. Eviction is always auditable in the log.
         return cls(
-            context_hard_cap=4800,
-            context_soft_warn=3800,
-            run_token_ceiling=80000,
-            reserve_for_response=2000,
             agents={
-                # Output ceilings must cover a reasoning preface plus the article
-                # JSON. GLM-5.3-Flash at its default effort returns empty content
-                # when max_tokens is only a couple of thousand.
-                "writer": AgentBudget("writer", 2000, 8192),
-                "tester": AgentBudget("tester", 2000, 4096),
-                "reviewer": AgentBudget("reviewer", 2000, 4096),
-                "architect": AgentBudget("architect", 1800, 4096),
-                "synthesizer": AgentBudget("synthesizer", 2400, 8192),
-            },
+                "writer": AgentBudget("writer"),
+                "tester": AgentBudget("tester"),
+                "reviewer": AgentBudget("reviewer"),
+                "architect": AgentBudget("architect"),
+                "synthesizer": AgentBudget("synthesizer"),
+            }
         )
 
     @classmethod
     def from_dict(cls, data: Dict, base: Optional["TokenBudget"] = None) -> "TokenBudget":
         base = base or cls.default()
         agents = dict(base.agents)
-        for agent_id, cfg in (data.get("agents") or {}).items():
-            agents[agent_id] = AgentBudget(
-                agent_id=agent_id,
-                max_input_tokens=int(cfg.get("max_input_tokens", 2000)),
-                max_output_tokens=int(cfg.get("max_output_tokens", 1000)),
-            )
-        return cls(
-            context_hard_cap=int(data.get("context_hard_cap", base.context_hard_cap)),
-            context_soft_warn=int(data.get("context_soft_warn", base.context_soft_warn)),
-            run_token_ceiling=int(data.get("run_token_ceiling", base.run_token_ceiling)),
-            reserve_for_response=int(data.get("reserve_for_response", base.reserve_for_response)),
-            agents=agents,
-        )
+        for agent_id in (data.get("agents") or {}):
+            agents.setdefault(agent_id, AgentBudget(agent_id))
+        return cls(agents=agents)
 
     def agent(self, agent_id: str) -> AgentBudget:
-        return self.agents.get(agent_id) or AgentBudget(agent_id, self.context_hard_cap, 1000)
-
-    def exceeds_soft_warn(self, tokens: int) -> bool:
-        return tokens >= self.context_soft_warn
-
-    def exceeds_hard_cap(self, tokens: int) -> bool:
-        return tokens > self.context_hard_cap
+        return self.agents.get(agent_id) or AgentBudget(agent_id)

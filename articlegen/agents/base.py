@@ -54,17 +54,13 @@ class BaseAgent:
         )
 
     def output_token_limit(self, brief: Brief) -> int:
-        """Ceiling for one completion. Not a spend target — the model stops early.
+        """Output budget for one completion. Unbounded: no artificial ceiling.
 
-        The default Dahl model (GLM-5.3-Flash) thinks at maximum effort unless
-        asked not to, and a 2k ``max_tokens`` is then consumed before any JSON
-        is emitted. Leave room for that trace plus the article itself.
+        Not a spend target — the model stops early. The provider still requires
+        a ``max_tokens`` value on the wire, so this returns a generous estimate
+        sized to the article; nothing in ArticleGen caps or floors it.
         """
-        configured = self.budget.agent(self.agent_id).max_output_tokens
-        if self.agent_id in ("writer", "synthesizer"):
-            article = int(max(brief.target_words, 200) * 1.8) + 1200
-            return min(12288, max(configured, article + 6000, 8192))
-        return max(configured, 4096)
+        return int(max(brief.target_words, 200) * 1.8) + 6000
 
     # -- execution --------------------------------------------------------
     def should_skip(self, brief: Brief, draft: Draft, peer_reports: List[AgentReport],

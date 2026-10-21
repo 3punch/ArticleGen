@@ -95,7 +95,6 @@ class Orchestrator:
             "engine": self.client.name() if self.client.available else "not-configured",
             "max_iterations": self.config.max_iterations,
             "score_target": self.config.score_target,
-            "context_hard_cap": self.config.budget.context_hard_cap,
         })
 
         # -- Stage 1: decision gate --------------------------------------
@@ -190,8 +189,6 @@ class Orchestrator:
                 min_delta=self.config.min_delta,
                 stall_window=self.config.stall_window,
                 stall_count=stall_count,
-                tokens_total=tokens_total,
-                token_ceiling=self.config.budget.run_token_ceiling,
                 degraded=any(r.status == AgentStatus.DEGRADED for r in iteration_record.reports),
             )
             # An empty outline used to score exactly 0.85 (every weight except
@@ -294,7 +291,6 @@ class Orchestrator:
                 brief=brief,
                 draft=draft,
                 rules_digest=self._digest,
-                budget=self.config.budget,
                 iteration=iteration,
                 draft_required=agent.draft_required,
                 peer_reports=reports,
@@ -377,10 +373,7 @@ class Orchestrator:
         applied = len(synthesizer.payload.get("applied") or []) if synthesizer else 0
         deferred = len(synthesizer.payload.get("deferred") or []) if synthesizer else 0
 
-        context_describe = (
-            f"cap={self.config.budget.context_hard_cap} "
-            f"evicted={','.join(sorted(set(evicted))) or 'none'}"
-        )
+        context_describe = f"evicted={','.join(sorted(set(evicted))) or 'none'}"
 
         record = IterationRecord(
             iteration=iteration,

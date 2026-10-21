@@ -255,7 +255,7 @@ def test_writer_delta_block_hides_unchanged_sections(valid_brief):
     draft = Draft.from_brief(valid_brief)
     for section in draft.sections:
         section.body = "Established prose that needs no further work this run. " * 40
-    block = writer_delta_block(valid_brief, draft, [], max_tokens=2000)
+    block = writer_delta_block(valid_brief, draft, [])
     assert block.count("unchanged,") == len(draft.sections)
     assert "Established prose" not in block
 
