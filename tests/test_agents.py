@@ -276,6 +276,54 @@ def test_build_draft_rejects_unusable_model_output(valid_brief, kind):
     assert build_draft({"sections": sections}, valid_brief, 1) is None
 
 
+def test_publish_draft_keeps_writer_prose_when_model_sections_are_incomplete(valid_brief):
+    from articlegen.agents.synthesizer import publish_draft
+    from articlegen.models import AgentReport
+
+    draft = Draft.from_brief(valid_brief)
+    writer = AgentReport(
+        agent_id="writer", role="Writer", iteration=1,
+        payload={"sections": [
+            {"id": section.id, "body": f"Kept prose for {section.id}."}
+            for section in valid_brief.sections
+        ]},
+    )
+    fallback = build_agents(OfflineClient(), TokenBudget.default())[-1].deterministic(
+        valid_brief, draft, 1, [writer],
+    )
+    published, recovered = publish_draft(
+        {"sections": [{"id": "Introduction", "body": "Opening rewrite."}]},
+        fallback, valid_brief, 0, "test",
+    )
+    assert recovered is True
+    assert published is not None
+    assert published.sections[0].body == "Opening rewrite."
+    assert all(section.body.strip() for section in published.sections[1:])
+
+
+def test_writer_accepts_title_ids_and_content_field(agents, valid_brief):
+    from articlegen.memory import AssembledContext
+    from articlegen.llm import LLMClient, LLMResponse
+    import json
+
+    class AliasClient(LLMClient):
+        available = True
+        engine_name = "alias"
+
+        def complete(self, system, user, *, max_output_tokens=1000):
+            return LLMResponse(text=json.dumps({"sections": [
+                {"title": section.title, "content": f"Alias prose for {section.id}."}
+                for section in valid_brief.sections
+            ]}), tokens_in=1, tokens_out=1, engine="alias")
+
+    writer = build_agents(AliasClient(), TokenBudget.default())[0]
+    report = writer.run(AssembledContext(text="context", tokens=1), valid_brief,
+                        Draft.from_brief(valid_brief), 1)
+    assert report.status == AgentStatus.OK
+    assert [item["id"] for item in report.payload["sections"]] == valid_brief.section_ids
+    assert all(item["body"].startswith("Alias prose") for item in report.payload["sections"])
+
+
 def test_required_context_overflow_never_calls_the_model(valid_brief):
     from articlegen.memory import AssembledContext
 

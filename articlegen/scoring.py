@@ -43,11 +43,27 @@ def _penalty(findings: List[Finding], sections: int) -> float:
     return min(1.0, weight / scale)
 
 
+def draft_is_publishable(draft: Draft, brief: Brief) -> bool:
+    """True when the draft is a real article, not an empty or stub outline.
+
+    Non-completeness weights sum to 0.85, so a hollow draft used to meet the
+    default score target whenever the other agents were silent.
+    """
+    if not draft.sections or any(not section.body.strip() for section in draft.sections):
+        return False
+    if brief.target_words and draft.word_count < int(brief.target_words * 0.5):
+        return False
+    return True
+
+
 def score_iteration(brief: Brief, draft: Draft, reports: List[AgentReport],
                     gate_result: Optional[GateResult] = None) -> ScoreCard:
     sections = max(1, len(brief.sections))
     by_agent = {r.agent_id: r for r in reports}
     notes: List[str] = []
+    if not any(section.body.strip() for section in draft.sections):
+        notes.append("draft has no article text; an empty outline cannot meet the target")
+        return ScoreCard(total=0.0, components={key: 0.0 for key in WEIGHTS}, notes=notes)
 
     # -- correctness ------------------------------------------------------
     tester = by_agent.get("tester")
@@ -104,7 +120,9 @@ def decide_next(score: float, previous_score: Optional[float], *, iteration: int
     ``decision`` is one of: ``stop``, ``continue``. ``stop_reason`` is always a
     concrete, logged cause (rule R8) - the loop never ends silently.
     """
-    if score >= score_target:
+    # A degraded iteration has no trustworthy score. Stopping here is how an
+    # empty outline used to exit as "score target met (0.8500 >= 0.85)".
+    if score >= score_target and not degraded:
         return "stop", f"score target met ({score:.4f} >= {score_target})", 0
 
     if tokens_total >= token_ceiling:

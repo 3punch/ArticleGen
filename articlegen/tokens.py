@@ -88,14 +88,17 @@ class TokenBudget:
         return cls(
             context_hard_cap=4800,
             context_soft_warn=3800,
-            run_token_ceiling=42000,
+            run_token_ceiling=80000,
             reserve_for_response=2000,
             agents={
-                "writer": AgentBudget("writer", 2000, 2000),
-                "tester": AgentBudget("tester", 2000, 800),
-                "reviewer": AgentBudget("reviewer", 2000, 800),
-                "architect": AgentBudget("architect", 1800, 700),
-                "synthesizer": AgentBudget("synthesizer", 2400, 2200),
+                # Output ceilings must cover a reasoning preface plus the article
+                # JSON. GLM-5.3-Flash at its default effort returns empty content
+                # when max_tokens is only a couple of thousand.
+                "writer": AgentBudget("writer", 2000, 8192),
+                "tester": AgentBudget("tester", 2000, 4096),
+                "reviewer": AgentBudget("reviewer", 2000, 4096),
+                "architect": AgentBudget("architect", 1800, 4096),
+                "synthesizer": AgentBudget("synthesizer", 2400, 8192),
             },
         )
 

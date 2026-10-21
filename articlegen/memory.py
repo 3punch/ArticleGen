@@ -426,7 +426,9 @@ class MemoryStore:
             f"agent: {agent_id} | iteration: {iteration} | task: {brief.task_id}\n"
             f"context_hard_cap: {budget.context_hard_cap} tokens | "
             f"agent_input_cap: {agent_budget.max_input_tokens} tokens\n"
-            "Rule: work only from the material below. Do not assume unseen history."
+            "Rule: work only from the material below. Do not assume unseen history.\n"
+            "reasoning_effort: low. Put the JSON answer in message content, "
+            "not only in a thinking trace."
         )
         if draft_key == "working_draft":
             header += (

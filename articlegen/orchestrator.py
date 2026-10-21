@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .agents import build_agents
-from .agents.synthesizer import build_draft
+from .agents.synthesizer import publish_draft
 from .changelog import ChangeLog
 from .events import EventBus, EventType
 from .gate import verify_brief, verify_draft
@@ -34,7 +34,7 @@ from .models import (
     Severity,
 )
 from .prompts import rules_digest
-from .scoring import ScoreCard, decide_next, score_iteration
+from .scoring import ScoreCard, decide_next, draft_is_publishable, score_iteration
 from .tokens import TokenBudget
 
 
@@ -194,6 +194,23 @@ class Orchestrator:
                 token_ceiling=self.config.budget.run_token_ceiling,
                 degraded=any(r.status == AgentStatus.DEGRADED for r in iteration_record.reports),
             )
+            # An empty outline used to score exactly 0.85 (every weight except
+            # completeness) and stop the loop as if the article were done.
+            if (decision == "stop" and stop_reason.startswith("score target met")
+                    and not draft_is_publishable(draft, brief)):
+                if iteration >= self.config.max_iterations:
+                    decision = "stop"
+                    stop_reason = (
+                        f"max iterations reached ({self.config.max_iterations}); "
+                        "score looked complete but the draft has no publishable article text"
+                    )
+                else:
+                    decision = "continue"
+                    stop_reason = ""
+            if (decision == "continue" and iteration >= 2
+                    and not any(section.body.strip() for section in draft.sections)):
+                decision = "stop"
+                stop_reason = "no article text after 2 iterations"
             iteration_record.decision = decision
             store.record_iteration(iteration_record.to_dict())
 
@@ -211,10 +228,20 @@ class Orchestrator:
             if report.status == AgentStatus.DEGRADED
             for note in report.notes
         ]
-        if failures:
-            stop_reason = f"{stop_reason or 'loop exited'}; generation failed: {failures[-1]}"
-        if not any(section.body.strip() for section in draft.sections):
-            stop_reason = f"No article content was generated. {stop_reason}"
+        draft_empty = not any(section.body.strip() for section in draft.sections)
+        if draft_empty:
+            # Prefer the provider/parse note over the generic "no usable draft"
+            # trailer, which is appended last and used to hide the real cause.
+            cause = next((item for item in failures if "no usable draft" not in item), None)
+            if cause is None and failures:
+                cause = failures[-1]
+            detail = f" {cause}." if cause else ""
+            stop_reason = (
+                f"No article content was generated.{detail} {stop_reason or 'loop exited'}"
+            ).strip()
+        elif failures:
+            agents = ", ".join(sorted({item.split(":", 1)[0] for item in failures}))
+            stop_reason = f"{stop_reason or 'loop exited'}; degraded agent(s): {agents}"
 
         store.write_master_draft(draft)
         store.drop_notes()
@@ -291,8 +318,17 @@ class Orchestrator:
             reports.append(report)
             tokens_used += report.tokens_in + report.tokens_out
 
-            new_draft = (build_draft(report.payload, brief, draft.version)
-                         if report.status != AgentStatus.DEGRADED else None)
+            # A degraded model call still has the Writer report in hand. Publish
+            # that prose instead of discarding the iteration — it is not invented
+            # text, and it is the only way an unusable synthesizer JSON cannot
+            # wipe a finished article.
+            fallback = agent.deterministic(
+                brief, draft, iteration, reports, store.open_findings,
+            )
+            model_payload = {} if report.status == AgentStatus.DEGRADED else report.payload
+            new_draft, recovered = publish_draft(
+                model_payload, fallback, brief, draft.version, report.engine,
+            )
             if new_draft is None:
                 report.status = AgentStatus.DEGRADED
                 report.notes.append(
@@ -300,6 +336,22 @@ class Orchestrator:
                     "with article text); master draft unchanged"
                 )
             else:
+                if recovered:
+                    report.payload = {
+                        "sections": [section.to_dict() for section in new_draft.sections],
+                        "title": new_draft.title,
+                        "applied": list(fallback.get("applied") or [])
+                        + ["synthesizer:published writer prose"],
+                        "deferred": fallback.get("deferred") or [],
+                        "rejected": fallback.get("rejected") or [],
+                        "summary": fallback.get("summary") or report.summary,
+                    }
+                    report.summary = str(report.payload["summary"])
+                    report.notes.append(
+                        "model draft was unusable; published the Writer's section text"
+                    )
+                    if report.status == AgentStatus.DEGRADED:
+                        report.status = AgentStatus.OK
                 draft = new_draft
                 self.events.emit(EventType.DRAFT_UPDATED, task_id=brief.task_id,
                                  iteration=iteration, agent=agent.agent_id,

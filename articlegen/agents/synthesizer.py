@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from ..models import AgentReport, AgentStatus, Brief, Draft, Finding, Section, Severity
 from .base import BaseAgent
+from .payload import iter_mapped_sections
 from .reviewer import FILLER_PATTERNS
 from .writer import apply_mechanical_polish
 
@@ -200,7 +201,7 @@ class Synthesizer(BaseAgent):
                 status: AgentStatus, notes: List[str], engine: str, tokens_in: int,
                 tokens_out: int, peer_reports: List[AgentReport],
                 open_findings: Optional[List[Finding]] = None) -> AgentReport:
-        sections = payload.get("sections") or []
+        sections = iter_mapped_sections(payload, brief) or payload.get("sections") or []
         return self.base_report(
             iteration=iteration, status=status, notes=notes, engine=engine,
             tokens_in=tokens_in, tokens_out=tokens_out, findings=[],
@@ -213,6 +214,79 @@ class Synthesizer(BaseAgent):
                 "rejected": payload.get("rejected") or [],
             },
         )
+
+
+def _coerce_model_payload(payload: Dict[str, Any], brief: Brief) -> Dict[str, Any]:
+    """Rewrite aliased section ids/bodies onto the outline before validation."""
+    if not isinstance(payload, dict):
+        return {"sections": []}
+    mapped = iter_mapped_sections(payload, brief)
+    if not mapped and isinstance(payload.get("sections"), list):
+        return payload
+    by_id = {section.id: section for section in brief.sections}
+    coerced = dict(payload)
+    coerced["sections"] = [
+        {
+            "id": item["id"],
+            "title": item["title"] or by_id[item["id"]].title,
+            "purpose": by_id[item["id"]].purpose,
+            "body": item["body"],
+            "word_target": by_id[item["id"]].word_target,
+        }
+        for item in mapped
+    ]
+    return coerced
+
+
+def publish_draft(model_payload: Dict[str, Any], fallback_payload: Dict[str, Any],
+                  brief: Brief, previous_version: int, engine: str = "synthesizer") -> tuple:
+    """Return ``(draft, recovered)``.
+
+    A complete model payload wins. Otherwise the deterministic merge — Writer
+    prose plus mechanical fixes, never invented sentences — is published, with
+    any non-empty model sections overlaid. ``None`` means neither source had
+    article text.
+    """
+    coerced = _coerce_model_payload(model_payload or {}, brief)
+    direct = build_draft(coerced, brief, previous_version)
+    if direct is not None:
+        direct.engine = engine or direct.engine or "synthesizer"
+        return direct, False
+
+    by_id = {section.id: section for section in brief.sections}
+    base_sections: Dict[str, Dict[str, Any]] = {}
+    for item in (fallback_payload or {}).get("sections") or []:
+        if isinstance(item, dict) and item.get("id") in by_id:
+            base_sections[item["id"]] = dict(item)
+    for source in brief.sections:
+        base_sections.setdefault(source.id, {
+            "id": source.id, "title": source.title, "purpose": source.purpose,
+            "body": "", "word_target": source.word_target,
+        })
+    overlaid = 0
+    for item in iter_mapped_sections(model_payload or {}, brief):
+        if not item["body"].strip() or item["id"] not in base_sections:
+            continue
+        base_sections[item["id"]]["body"] = item["body"]
+        if item["title"]:
+            base_sections[item["id"]]["title"] = item["title"]
+        overlaid += 1
+    merged = dict(fallback_payload or {})
+    merged["sections"] = [base_sections[sid] for sid in brief.section_ids]
+    merged["title"] = (
+        (model_payload or {}).get("title")
+        or (fallback_payload or {}).get("title")
+        or brief.title
+    )
+    if overlaid:
+        applied = list(merged.get("applied") or [])
+        applied.append(f"synthesizer:overlaid {overlaid} model section(s) onto writer draft")
+        merged["applied"] = applied
+    draft = build_draft(merged, brief, previous_version)
+    if draft is None:
+        return None, False
+    draft.engine = f"{engine}+writer-merge" if engine else "synthesizer:writer-merge"
+    return draft, True
 
 
 def build_draft(payload: Dict[str, Any], brief: Brief, previous_version: int) -> Optional[Draft]:

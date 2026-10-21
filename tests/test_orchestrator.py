@@ -194,6 +194,24 @@ def test_decide_next_respects_token_ceiling():
     assert "token ceiling" in reason
 
 
+def test_decide_next_does_not_treat_a_degraded_score_as_target_met():
+    decision, reason, _ = decide_next(
+        score=0.90, previous_score=None, iteration=1, max_iterations=4, score_target=0.85,
+        min_delta=0.01, stall_window=2, stall_count=0, tokens_total=0,
+        token_ceiling=60000, degraded=True,
+    )
+    assert decision == "continue"
+    assert "target met" not in reason
+
+
+def test_empty_outline_cannot_meet_the_default_target(valid_brief):
+    from articlegen.scoring import score_iteration
+
+    card = score_iteration(valid_brief, Draft.from_brief(valid_brief), [])
+    assert card.total == 0.0
+    assert card.total < 0.85
+
+
 def test_decide_next_does_not_stall_on_degraded_output():
     decision, _, stall = decide_next(
         score=0.5, previous_score=0.5, iteration=1, max_iterations=9, score_target=0.85,
@@ -283,6 +301,47 @@ def test_empty_synthesis_is_degraded_and_explained(tmp_path, valid_brief):
     assert "synthesizer" in result.stop_reason
     report = result.iterations[0].reports[-1]
     assert report.status == AgentStatus.DEGRADED
+    assert "score target met" not in result.stop_reason
+    assert result.final_score == 0.0
     persisted = json.loads((tmp_path / "runs" / valid_brief.task_id / "iterations" /
                             "iter-01" / "report-synthesizer.json").read_text())
     assert persisted["status"] == AgentStatus.DEGRADED.value
+
+
+def test_writer_prose_is_published_when_synthesizer_json_is_unusable(tmp_path, valid_brief):
+    """The failure the dashboard showed on every Dahl run: synthesizer JSON did
+    not validate, the empty outline scored exactly 0.85, and the Writer's
+    article was thrown away.
+    """
+    import json
+    from articlegen.llm import LLMClient, LLMResponse
+
+    class PartialClient(LLMClient):
+        available = True
+        engine_name = "partial"
+
+        def complete(self, system, user, *, max_output_tokens=1000):
+            if "Agent 1" in system:
+                payload = {"sections": [
+                    {"id": section.id, "content": f"Writer prose for {section.id} is here."}
+                    for section in valid_brief.sections
+                ]}
+            elif "Agent 5" in system:
+                payload = {"sections": [{
+                    "id": valid_brief.sections[0].title,
+                    "body": "Model revision of the opening section only.",
+                }]}
+            else:
+                payload = {"findings": []}
+            return LLMResponse(text=json.dumps(payload), tokens_in=5, tokens_out=5,
+                               engine="partial")
+
+    result = Orchestrator(_config(tmp_path, max_iterations=1), client=PartialClient()).run(valid_brief)
+    assert result.final_draft is not None
+    assert result.final_draft.version == 1
+    bodies = {section.id: section.body for section in result.final_draft.sections}
+    assert bodies["introduction"].startswith("Model revision")
+    assert "Writer prose for mechanism" in bodies["mechanism"]
+    assert "Writer prose for limits" in bodies["limits"]
+    assert "No article content was generated" not in result.stop_reason
+    assert "score target met" not in result.stop_reason

@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..llm import LLMClient, ProviderError, ResponseParseError, parse_json
+from ..llm import LLMClient, ProviderError, ResponseParseError, parse_json, salvage_truncated_json
 from ..memory import AssembledContext
 from ..models import AgentReport, AgentStatus, Brief, Draft, Finding
 from ..prompts import load_template, rules_digest
 from ..tokens import TokenBudget, count_tokens
+from .payload import sections_from_markdown
 
 
 class BaseAgent:
@@ -46,7 +47,24 @@ class BaseAgent:
         return self._digest
 
     def system_prompt(self) -> str:
-        return f"{self.digest}\n\n---\n\n{self.template}"
+        return (
+            f"{self.digest}\n\n---\n\n{self.template}\n\n"
+            "Output contract: reply with one JSON object only. Reasoning effort is low — "
+            "do not spend the output budget on analysis, and do not emit think tags."
+        )
+
+    def output_token_limit(self, brief: Brief) -> int:
+        """Ceiling for one completion. Not a spend target — the model stops early.
+
+        The default Dahl model (GLM-5.3-Flash) thinks at maximum effort unless
+        asked not to, and a 2k ``max_tokens`` is then consumed before any JSON
+        is emitted. Leave room for that trace plus the article itself.
+        """
+        configured = self.budget.agent(self.agent_id).max_output_tokens
+        if self.agent_id in ("writer", "synthesizer"):
+            article = int(max(brief.target_words, 200) * 1.8) + 1200
+            return min(12288, max(configured, article + 6000, 8192))
+        return max(configured, 4096)
 
     # -- execution --------------------------------------------------------
     def should_skip(self, brief: Brief, draft: Draft, peer_reports: List[AgentReport],
@@ -75,7 +93,6 @@ class BaseAgent:
                 summary=f"skipped: {skip_reason}", payload={"skipped": skip_reason},
             )
         tokens_in = context.tokens + count_tokens(system)
-        agent_budget = self.budget.agent(self.agent_id)
         status = AgentStatus.OK
         notes: List[str] = []
         payload: Dict[str, Any] = {}
@@ -101,21 +118,46 @@ class BaseAgent:
             engine = f"{self.client.engine_name}:not-configured"
             payload = {"_error": "provider not configured", "sections": [], "findings": []}
         else:
+            response = None
             try:
-                response = self.client.complete(system, context.text,
-                                                max_output_tokens=agent_budget.max_output_tokens)
-                payload = parse_json(response.text)
-                if not isinstance(payload, dict):
-                    payload = {"payload": payload}
+                response = self.client.complete(
+                    system, context.text,
+                    max_output_tokens=self.output_token_limit(brief),
+                )
                 engine = response.engine
                 tokens_in = max(tokens_in, response.tokens_in)
                 response_tokens_out = response.tokens_out
+                try:
+                    payload = parse_json(response.text)
+                except ResponseParseError as exc:
+                    repaired = salvage_truncated_json(response.text)
+                    salvaged = []
+                    if repaired is None and self.agent_id in ("writer", "synthesizer"):
+                        salvaged = sections_from_markdown(response.text, brief)
+                    if repaired is not None:
+                        payload = repaired
+                        notes.append("model output was truncated; recovered a partial JSON object")
+                    elif salvaged:
+                        payload = {
+                            "sections": salvaged,
+                            "summary": "extracted section bodies from a non-JSON model reply",
+                        }
+                        notes.append(
+                            "model reply was not JSON; section bodies were extracted from headings"
+                        )
+                    else:
+                        raise exc
+                if not isinstance(payload, dict):
+                    payload = {"payload": payload}
             except (ProviderError, ResponseParseError) as exc:
                 # Never substitute deterministic prose or findings when a real
                 # provider call fails; mark this agent degraded and preserve the
                 # failure for the run report.
                 status = AgentStatus.DEGRADED
-                notes.append(f"LLM call failed: {exc}")
+                detail = str(exc)
+                if response is not None and response.finish_reason == "length":
+                    detail = f"{detail} (output truncated at {response.tokens_out} tokens)"
+                notes.append(f"LLM call failed: {detail}")
                 engine = f"{self.client.engine_name}:error"
                 payload = {"_error": str(exc), "sections": [], "findings": []}
 

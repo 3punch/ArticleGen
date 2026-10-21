@@ -64,4 +64,7 @@ Return **only** a JSON object:
 ```
 
 `sections` must be the **complete** document, in final order — it replaces the master
-draft wholesale. Omitting a section deletes it.
+draft wholesale. Omitting a section deletes it. If the reply would be cut off, return
+only the sections you actually revised, with exact outline ids and non-empty Markdown
+bodies copied from `working_draft` unless a finding required a change. Never replace
+a non-empty working-draft body with an empty string.

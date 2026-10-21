@@ -171,8 +171,8 @@ convention, and tuned for minimum spend:
 | ------- | ------- | ----- |
 | Context hard cap per agent call | 4800 tokens | `TokenBudget.context_hard_cap` |
 | Soft warning threshold | 3800 tokens | `TokenBudget.context_soft_warn` |
-| Per-agent input/output ceilings | 1800–2400 / 700–2200 | `TokenBudget.agents` |
-| Whole-run token ceiling | 42000 tokens | `TokenBudget.run_token_ceiling` |
+| Per-agent input/output ceilings | 1800–2400 / 4096–8192 | `TokenBudget.agents` |
+| Whole-run token ceiling | 80000 tokens | `TokenBudget.run_token_ceiling` |
 | Open findings retained | 40 max | `MemoryStore.absorb_findings` |
 | Rolling history retained | 8 entries / 450 tokens | `RollingMemory` |
 

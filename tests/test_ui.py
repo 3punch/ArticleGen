@@ -921,10 +921,10 @@ def test_empty_generation_shows_failure_instead_of_article_download(tmp_path, mo
 
     def empty_synthesis(system, user, *, max_output_tokens=1000):
         response = original_complete(system, user, max_output_tokens=max_output_tokens)
-        if "# Agent 5 — Synthesizer" not in system:
+        if "# Agent 1 — Writer" not in system and "# Agent 5 — Synthesizer" not in system:
             return response
         payload = json.loads(response.text)
-        for section in payload["sections"]:
+        for section in payload.get("sections") or []:
             section["body"] = ""
         return LLMResponse(text=json.dumps(payload), tokens_in=10, tokens_out=10,
                            engine="test-llm:empty")
