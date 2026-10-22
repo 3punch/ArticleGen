@@ -20,7 +20,7 @@ from .agents.synthesizer import publish_draft
 from .changelog import ChangeLog
 from .events import EventBus, EventType
 from .gate import verify_brief, verify_draft
-from .llm import LLMClient, resolve_client
+from .llm import LLMClient, ResilientClient, resolve_client, resolve_resilient_client
 from .memory import MemoryStore, findings_block
 from .models import (
     AgentReport,
@@ -34,6 +34,7 @@ from .models import (
     Severity,
 )
 from .prompts import rules_digest
+from .prompt2brief import brief_from_prompt
 from .research.pipeline import ResearchOutcome, ResearchPipeline
 from .scoring import ScoreCard, decide_next, draft_is_publishable, score_iteration
 from .tokens import TokenBudget
@@ -62,6 +63,12 @@ class OrchestratorConfig:
     review_iterations: int = 1
     execute_experiments: Optional[bool] = None
     experiment_timeout: Optional[int] = None
+    #: Autonomous mode: build the brief from a single prompt, wrap the client in a
+    #: resilient (retry + fallback) client, and re-run the pipeline until the quality
+    #: gate reaches "ready for final review" or progress stalls.
+    auto: bool = False
+    max_autonomous_rounds: int = 4
+    fallback_models: Optional[List[str]] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "OrchestratorConfig":
@@ -90,7 +97,18 @@ class OrchestratorConfig:
             experiment_timeout=(int(data["experiment_timeout"])
                                 if data.get("experiment_timeout") is not None
                                 else base.experiment_timeout),
+            auto=bool(data.get("auto", base.auto)),
+            max_autonomous_rounds=int(data.get("max_autonomous_rounds",
+                                               base.max_autonomous_rounds)),
+            fallback_models=(list(data["fallback_models"])
+                             if data.get("fallback_models") is not None
+                             else base.fallback_models),
         )
+
+
+def _quality_rank(status: str) -> int:
+    """Ordering for quality-gate outcomes: ready > needs_revision > incomplete."""
+    return {"ready_for_final_review": 2, "needs_revision": 1}.get(status, 0)
 
 
 class Orchestrator:
@@ -100,6 +118,17 @@ class Orchestrator:
                  events: Optional[EventBus] = None) -> None:
         self.config = config or OrchestratorConfig()
         self.client = client or resolve_client(self.config.provider, self.config.model)
+        # Autonomous mode makes the client self-healing: transient rate limits and
+        # capacity errors retry, then fall back to alternative models, so a single
+        # stuck model cannot abort a run. A client the caller already made resilient
+        # (e.g. the dashboard) is left untouched.
+        if self.config.auto and self.client.available \
+                and not isinstance(self.client, ResilientClient):
+            self.client = resolve_resilient_client(
+                provider=self.config.provider,
+                model=self.config.model,
+                fallback_models=self.config.fallback_models,
+            )
         self.changelog = changelog or ChangeLog(self.config.changelog_path)
         self.agents = build_agents(self.client, self.config.budget,
                                    prompt_dir=self.config.prompt_dir,
@@ -112,6 +141,59 @@ class Orchestrator:
 
     # -- entry point ------------------------------------------------------
     def run(self, brief: Brief) -> RunResult:
+        """Public entry point: run the full pipeline once (see ``_run_full``)."""
+        return self._run_full(brief)
+
+    def run_autonomous(self, prompt: str) -> RunResult:
+        """Run the whole pipeline from a single natural-language prompt.
+
+        Builds a gate-valid brief from the prompt, then runs the pipeline and, if the
+        research quality gate is not yet ``ready_for_final_review``, re-runs it up to
+        ``max_autonomous_rounds`` times. Re-runs stop early when a full pass makes no
+        progress (same quality status and score) so a blocker that cannot be resolved
+        - e.g. no source provider available - does not burn tokens forever. The best
+        result seen (preferring a ready gate, then the highest score) is always
+        returned, and a full article is written to the workspace regardless.
+        """
+        brief = brief_from_prompt(prompt, self.client, target_words=1400)
+        self.changelog.log_event("AUTO_START", brief.task_id, {
+            "prompt": prompt[:280],
+            "auto_rounds": self.config.max_autonomous_rounds,
+        })
+        self.events.emit(
+            EventType.RUN_START, task_id=brief.task_id,
+            message="auto-built brief from one prompt; running autonomously",
+            title=brief.title, sections=len(brief.sections),
+            max_iterations=self.config.max_iterations,
+            score_target=self.config.score_target,
+            engine=(self.client.name() if self.client.available else "not-configured"),
+            autonomous=True,
+        )
+
+        best: Optional[RunResult] = None
+        best_rank = -1
+        prev_key = None
+        rounds = max(1, int(self.config.max_autonomous_rounds))
+        for attempt in range(1, rounds + 1):
+            result = self._run_full(brief)
+            rank = _quality_rank(result.quality_status)
+            if best is None or (rank, result.final_score) > (best_rank, best.final_score):
+                best = result
+                best_rank = rank
+            if result.quality_status == "ready_for_final_review":
+                break
+            key = (result.quality_status, round(result.final_score, 4))
+            if prev_key is not None and key == prev_key:
+                self.changelog.log_event("AUTO_STOP", brief.task_id, {
+                    "reason": "no quality progress across a full re-run",
+                    "attempt": attempt,
+                })
+                break
+            prev_key = key
+        return best if best is not None else result
+
+    # -- full pipeline (one pass) -----------------------------------------
+    def _run_full(self, brief: Brief) -> RunResult:
         self.changelog.log_event("RUN_START", brief.task_id, {
             "title": brief.title,
             "mode": brief.mode.value,

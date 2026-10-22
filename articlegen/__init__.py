@@ -19,7 +19,9 @@ from .models import (
 )
 from .tokens import TokenBudget, count_tokens
 from .gate import verify_brief, verify_draft
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, OrchestratorConfig
+from .prompt2brief import brief_from_prompt
+from .llm import ResilientClient, resolve_resilient_client
 
 __version__ = "0.1.0"
 
@@ -31,11 +33,15 @@ __all__ = [
     "GateResult",
     "IterationRecord",
     "Orchestrator",
+    "OrchestratorConfig",
+    "ResilientClient",
     "RunResult",
     "Section",
     "Severity",
     "TokenBudget",
+    "brief_from_prompt",
     "count_tokens",
+    "resolve_resilient_client",
     "verify_brief",
     "verify_draft",
     "__version__",

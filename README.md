@@ -72,6 +72,35 @@ Or with the console script after `pip install -e .`:
 articlegen run path/to/brief.json --target 0.9 --provider auto
 ```
 
+### One prompt → full article (`auto`)
+
+The `auto` command takes a single natural-language prompt, builds a complete brief
+from it, and runs the **entire** pipeline autonomously — plan, retrieve/verify
+sources, execute experiments, write, peer-review, and revise — looping until the
+research quality gate reaches *Ready for final review* (or until a re-run makes no
+progress, so a blocker such as an unavailable source provider cannot burn tokens
+forever). The client is made self-healing: on a rate limit (HTTP 429) it retries
+with backoff and then falls back to alternative models.
+
+```bash
+# one sentence in, a full validated article out
+articlegen auto "Write a computational article explaining how to verify the \
+Erdős–Gyárfás conjecture on a sample of cubic graphs, with a runnable Python experiment"
+
+# recover from a capacity-limited model automatically
+export ARTICLEGEN_FALLBACK_MODELS='deepseek-ai/DeepSeek-V4-Flash-0731,MiniMaxAI/MiniMax-M2.7'
+articlegen auto "your prompt here" --out article.md
+```
+
+The Streamlit dashboard exposes the same flow as a **⚡ One-prompt mode** expander at
+the top of the page: paste one prompt, press *Generate full article*.
+
+Or with the console script after `pip install -e .`:
+
+```bash
+articlegen run path/to/brief.json --target 0.9 --provider auto
+```
+
 With `pytest` available:
 
 ```bash
