@@ -19,10 +19,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
 DEFAULT_LLM_TIMEOUT_SECONDS = 300
@@ -402,6 +403,159 @@ def resolve_client(provider: str = "auto", model: Optional[str] = None,
     # ``offline`` is supported only as an internal testing sentinel. It has no
     # drafting implementation, and the orchestrator refuses to start a run with it.
     return OfflineClient()
+
+
+# -- resilient client (retry + model/provider fallback) -------------------
+
+
+def _label_for(client: LLMClient) -> str:
+    """Short, stable identifier for a client (used to dedupe fallback candidates)."""
+    model = getattr(client, "model", "") or ""
+    return f"{client.engine_name}:{model}" if model else client.engine_name
+
+
+def _parse_retry_after(text: str) -> Optional[int]:
+    """Best-effort extraction of a ``Retry-After``-style delay from an error body."""
+    for pattern in (r"retry after\s+(\d+)", r"retry-after[:\s]+(\d+)"):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _split_fallback(spec: str, family: str) -> Tuple[str, str]:
+    """Split a ``provider:model`` fallback spec; default the family to the primary."""
+    spec = spec.strip()
+    if ":" in spec:
+        fam, model = spec.split(":", 1)
+        fam, model = fam.strip().lower(), model.strip()
+    else:
+        fam, model = family, spec
+    if fam not in ("dahl", "anthropic", "openai"):
+        fam = family
+    return fam, model
+
+
+def _build_fallback(family: str, model: str, provider: str, api_key: Optional[str],
+                    base_url: Optional[str], dahl_api_key: Optional[str],
+                    dahl_base_url: Optional[str],
+                    timeout: Optional[int]) -> LLMClient:
+    if family == "dahl":
+        return resolve_client(provider="dahl", dahl_api_key=dahl_api_key,
+                             dahl_model=model, dahl_base_url=dahl_base_url,
+                             timeout=timeout)
+    if family == "anthropic":
+        return resolve_client(provider="anthropic", api_key=api_key, model=model,
+                             base_url=base_url, timeout=timeout)
+    if family == "openai":
+        return resolve_client(provider="openai", api_key=api_key, model=model,
+                             base_url=base_url, timeout=timeout)
+    return resolve_client(provider=provider, model=model, api_key=api_key,
+                         base_url=base_url, dahl_api_key=dahl_api_key,
+                         dahl_model=model if provider == "dahl" else None,
+                         dahl_base_url=dahl_base_url, timeout=timeout)
+
+
+class ResilientClient(LLMClient):
+    """Retry-with-fallback wrapper around one or more underlying ``LLMClient``s.
+
+    A single model at capacity (HTTP 429) must not degrade an entire run - which is
+    exactly what happened to the ``erdos2`` run. On a :class:`ProviderError` the
+    client retries the *current* candidate with exponential backoff (honouring a
+    ``Retry-After`` hint when one is present in the error text), then moves on to the
+    next candidate. If every candidate fails the last error is raised so the caller
+    can mark the agent ``DEGRADED`` instead of inventing output.
+    """
+
+    def __init__(self, candidates: Sequence[Tuple[LLMClient, str]],
+                 *, max_retries: int = 3, base_backoff: float = 2.0) -> None:
+        self._candidates = [(c, lbl) for c, lbl in candidates if c is not None]
+        self.max_retries = max(0, int(max_retries))
+        self.base_backoff = float(base_backoff)
+        self.available = any(getattr(c, "available", False) for c, _ in self._candidates)
+
+    @property
+    def engine_name(self) -> str:
+        return "resilient"
+
+    def name(self) -> str:
+        if self._candidates:
+            return f"resilient[{self._candidates[0][1]}]"
+        return "resilient[none]"
+
+    def complete(self, system: str, user: str, *, max_output_tokens: int = 1000) -> "LLMResponse":
+        last_exc: Optional[ProviderError] = None
+        for client, _label in self._candidates:
+            if not getattr(client, "available", False):
+                continue
+            attempt = 0
+            while True:
+                try:
+                    return client.complete(system, user, max_output_tokens=max_output_tokens)
+                except ProviderError as exc:
+                    last_exc = exc
+                    if attempt >= self.max_retries:
+                        break
+                    attempt += 1
+                    delay = min(
+                        _parse_retry_after(str(exc)) or self.base_backoff * (2 ** (attempt - 1)),
+                        30.0,
+                    )
+                    time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        raise ProviderError(
+            "no LLM provider configured; article generation requires a "
+            "Dahl/Anthropic/OpenAI key"
+        )
+
+
+def resolve_resilient_client(provider: str = "auto", model: Optional[str] = None,
+                             api_key: Optional[str] = None, base_url: Optional[str] = None,
+                             dahl_api_key: Optional[str] = None,
+                             dahl_model: Optional[str] = None,
+                             dahl_base_url: Optional[str] = None,
+                             timeout: Optional[int] = None,
+                             fallback_models: Optional[Sequence[str]] = None) -> LLMClient:
+    """Resolve a :class:`ResilientClient` with the primary plus fallback models.
+
+    The primary is resolved exactly as :func:`resolve_client` would. Fallback models
+    come from ``fallback_models`` (e.g. ``["deepseek-ai/DeepSeek-V4-Flash-0731",
+    "MiniMaxAI/MiniMax-M2.7"]``) or, when that is ``None``, from the
+    ``ARTICLEGEN_FALLBACK_MODELS`` environment variable (comma-separated). Each entry
+    may be ``model`` (same family as the primary) or ``provider:model`` (e.g.
+    ``anthropic:claude-...``). Candidates that lack credentials are skipped, and the
+    primary is always first.
+    """
+    primary = resolve_client(
+        provider=provider, model=model, api_key=api_key, base_url=base_url,
+        dahl_api_key=dahl_api_key, dahl_model=dahl_model, dahl_base_url=dahl_base_url,
+        timeout=timeout,
+    )
+    if fallback_models is None:
+        raw = os.environ.get("ARTICLEGEN_FALLBACK_MODELS", "").strip()
+        fallback_models = [m.strip() for m in raw.split(",") if m.strip()]
+
+    candidates: List[Tuple[LLMClient, str]] = [(primary, _label_for(primary))]
+    seen = {_label_for(primary)}
+    family = primary.engine_name  # "dahl" | "anthropic" | "openai" | "offline"
+    for spec in fallback_models or []:
+        fam, mdl = _split_fallback(spec, family)
+        try:
+            fallback = _build_fallback(
+                fam, mdl, provider, api_key, base_url, dahl_api_key, dahl_base_url,
+                timeout,
+            )
+        except Exception:  # noqa: BLE001 - a bad fallback must not break the run
+            continue
+        if not getattr(fallback, "available", False):
+            continue
+        label = _label_for(fallback)
+        if label in seen:
+            continue
+        seen.add(label)
+        candidates.append((fallback, label))
+    return ResilientClient(candidates)
 
 
 # -- response parsing -----------------------------------------------------

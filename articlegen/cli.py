@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from . import __version__
 from .changelog import ChangeLog, read_jsonl
 from .gate import verify_brief
+from .llm import resolve_resilient_client
 from .models import ArticleType, Brief, CitationStyle
 from .orchestrator import Orchestrator, OrchestratorConfig
 
@@ -177,6 +178,108 @@ def cmd_run(args: argparse.Namespace) -> int:
         _print_issues(result.gate.issues)
 
     return 0 if result.status == "PASS" else 1
+
+
+def cmd_auto(args: argparse.Namespace) -> int:
+    """One prompt in, a full article out - build the brief and run autonomously."""
+    prompt = args.prompt
+    if getattr(args, "prompt_file", None):
+        with open(args.prompt_file, "r", encoding="utf-8") as handle:
+            prompt = handle.read()
+    if not prompt or not prompt.strip():
+        print("error: no prompt supplied (pass a prompt argument or --prompt-file)",
+              file=sys.stderr)
+        return 2
+
+    config_data = _load_config(args.config)
+    config = OrchestratorConfig.from_dict(config_data)
+    # Autonomous mode: build the brief from the prompt, self-heal the client, and
+    # loop the pipeline to a ready quality gate.
+    config.auto = True
+    if args.iterations is not None:
+        config.max_iterations = args.iterations
+    if args.target is not None:
+        config.score_target = args.target
+    if args.provider:
+        config.provider = args.provider
+    if getattr(args, "model", None):
+        config.model = args.model
+    if args.workspace:
+        config.workspace = args.workspace
+    if args.changelog:
+        config.changelog_path = args.changelog
+    if getattr(args, "auto_rounds", None) is not None:
+        config.max_autonomous_rounds = args.auto_rounds
+    if getattr(args, "no_research", False):
+        config.research = False
+    if getattr(args, "review_iterations", None) is not None:
+        config.review_iterations = args.review_iterations
+    if getattr(args, "source_retrieval", None):
+        config.source_retrieval = args.source_retrieval
+    if getattr(args, "max_sources", None) is not None:
+        config.max_sources = args.max_sources
+    if getattr(args, "experiment_timeout", None) is not None:
+        config.experiment_timeout = args.experiment_timeout
+    if getattr(args, "no_experiments", False):
+        config.execute_experiments = False
+    if getattr(args, "fallback_models", None):
+        config.fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()]
+
+    client = resolve_resilient_client(
+        provider=config.provider, model=config.model,
+        fallback_models=config.fallback_models,
+    )
+    orchestrator = Orchestrator(config, client=client, changelog=ChangeLog(config.changelog_path))
+    result = orchestrator.run_autonomous(prompt)
+
+    # Mirror cmd_run's reporting, plus always write the article to disk.
+    print(f"\ntask      : {result.task_id}")
+    print(f"status    : {result.status}")
+    print(f"stop      : {result.stop_reason}")
+    print(f"score     : {result.final_score:.4f} (target {config.score_target})")
+    print(f"iterations: {len(result.iterations)}")
+    print(f"tokens    : {result.tokens_total}")
+    print(f"workspace : {result.workspace or '(not created; run stopped before generation)'}")
+    if result.quality_status:
+        print(f"research  : {result.quality_status}")
+        gate = (result.research or {}).get("quality_gate") or {}
+        for reason in (gate.get("reasons") or [])[:8]:
+            print(f"  - {reason}")
+        report_path = os.path.join(result.workspace, "research", "report.md")
+        if os.path.exists(report_path):
+            print(f"report    : {report_path}")
+    if result.final_draft is not None:
+        print(f"draft     : {os.path.join(result.workspace, 'master_draft.md')}")
+    else:
+        print(f"draft     : not created ({result.stop_reason})")
+    print(f"log       : {config.changelog_path}")
+
+    for record in result.iterations:
+        previous = "-" if record.previous_score is None else f"{record.previous_score:.4f}"
+        print(f"  iter {record.iteration}: {previous} -> {record.score:.4f} "
+              f"({record.delta:+.4f}) findings={record.finding_count} "
+              f"applied={record.applied} deferred={record.deferred} "
+              f"tokens={record.tokens_total} [{record.decision}]")
+
+    if args.json:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json)) or ".", exist_ok=True)
+        with open(args.json, "w", encoding="utf-8") as handle:
+            json.dump(result.to_dict(), handle, indent=2)
+        print(f"result json: {args.json}")
+
+    out_path = args.out or os.path.join(result.workspace or ".", "article.md")
+    if result.final_draft is not None and any(
+            s.body.strip() for s in result.final_draft.sections):
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as handle:
+            handle.write(result.final_draft.to_markdown())
+        print(f"article   : {out_path}")
+    else:
+        print("article   : not written (no usable draft produced)")
+
+    # Exit 0 when the article reached the validated gate; otherwise report the
+    # block so callers (and CI) can tell a finished article from a proposal.
+    return 0 if result.quality_status == "ready_for_final_review" else 1
 
 
 def cmd_log(args: argparse.Namespace) -> int:
@@ -349,6 +452,40 @@ def build_parser() -> argparse.ArgumentParser:
     log.add_argument("--task", default=None)
     log.add_argument("--limit", type=int, default=20)
     log.set_defaults(func=cmd_log)
+
+    auto = sub.add_parser(
+        "auto", help="build the brief from ONE prompt and run the pipeline autonomously "
+                     "to a full, validated article")
+    auto.add_argument("prompt", nargs="?", default=None,
+                      help="one natural-language prompt describing the article")
+    auto.add_argument("--prompt-file", default=None,
+                      help="read the prompt from a file instead of the argument")
+    auto.add_argument("--out", default=None,
+                      help="write the final article markdown here")
+    auto.add_argument("--auto-rounds", type=int, default=4,
+                      help="max autonomous re-run rounds (stops early on no progress)")
+    auto.add_argument("--iterations", type=int, default=None)
+    auto.add_argument("--target", type=float, default=None, help="quality score target")
+    auto.add_argument("--provider", default=None,
+                      choices=["auto", "anthropic", "openai", "dahl"])
+    auto.add_argument("--model", default=None,
+                      help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
+    auto.add_argument("--fallback-models", default=None,
+                      help="comma-separated fallback models, e.g. "
+                           "deepseek-ai/DeepSeek-V4-Flash-0731,MiniMaxAI/MiniMax-M2.7")
+    auto.add_argument("--workspace", default=None)
+    auto.add_argument("--changelog", default=None)
+    auto.add_argument("--config", default=None)
+    auto.add_argument("--json", default=None, help="write the full result JSON here")
+    auto.add_argument("--no-research", action="store_true",
+                      help="disable research stages")
+    auto.add_argument("--review-iterations", type=int, default=None)
+    auto.add_argument("--source-retrieval", default=None,
+                      choices=["auto", "crossref", "user", "static", "none"])
+    auto.add_argument("--max-sources", type=int, default=None)
+    auto.add_argument("--no-experiments", action="store_true")
+    auto.add_argument("--experiment-timeout", type=int, default=None)
+    auto.set_defaults(func=cmd_auto)
 
     ui = sub.add_parser("ui", help="launch the Streamlit web dashboard")
     ui.add_argument("--port", type=int, default=8501)

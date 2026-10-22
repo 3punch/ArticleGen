@@ -20,7 +20,7 @@ import streamlit as st
 
 from articlegen.changelog import read_jsonl
 from articlegen.events import EventBus
-from articlegen.llm import DahlClient, resolve_client
+from articlegen.llm import DahlClient, resolve_client, resolve_resilient_client
 from articlegen.orchestrator import Orchestrator, OrchestratorConfig
 from articlegen.cli import TEMPLATE_BRIEF
 from articlegen.ui import builder, render
@@ -169,6 +169,97 @@ with st.sidebar:
     )
 
 # -- tabs -----------------------------------------------------------------
+
+# -- One-prompt autonomous mode -----------------------------------------
+# The whole point of the rewrite: one sentence in, a full article out. This builds the
+# brief, makes the client self-healing (retry + model fallback on rate limits) and runs
+# the pipeline to a ready quality gate, storing results in the same session keys the
+# tabs below read from.
+with st.expander("⚡ One-prompt mode — describe the article in a single sentence",
+                 expanded=False):
+    st.caption(
+        "Type one prompt. The pipeline builds the brief, plans, retrieves and verifies "
+        "sources, runs experiments, writes, reviews and revises until the article is "
+        "complete. No manual brief editing required."
+    )
+    one_prompt = st.text_area(
+        "Your prompt", key="one_prompt", height=110,
+        placeholder=("e.g. Write a computational article explaining how to verify the "
+                     "Erdős–Gyárfás conjecture on a sample of cubic graphs, with a "
+                     "runnable Python experiment."),
+    )
+    one_rounds = st.number_input("Max autonomous rounds", 1, 8, 4, key="one_rounds")
+    _one_can_run = bool(
+        (st.session_state.get("dahl_api_key", "") or os.environ.get("DAHL_API_KEY", "")).strip()
+        or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
+    one_run = st.button("🚀 Generate full article", type="primary", key="one_run",
+                        disabled=not _one_can_run)
+    one_container = st.container()
+    if one_run and one_prompt.strip():
+        tracker = TrackerState(max_iterations=iterations)
+        st.session_state["tracker"] = tracker
+        events = EventBus()
+        events.subscribe(tracker.consume)
+        events.subscribe(
+            lambda e: render.render_tracker(one_container, tracker, score_target)
+        )
+        llm_client = resolve_resilient_client(
+            provider=provider,
+            model=st.session_state.get("dahl_model", "") if provider == "dahl" else None,
+            api_key=st.session_state.get("dahl_api_key", "") if provider == "dahl" else None,
+            base_url=st.session_state.get("dahl_base_url", "") if provider == "dahl" else None,
+            dahl_api_key=st.session_state.get("dahl_api_key", ""),
+            dahl_model=st.session_state.get("dahl_model", ""),
+            dahl_base_url=st.session_state.get("dahl_base_url", ""),
+        )
+        config = OrchestratorConfig.from_dict({
+            "max_iterations": iterations,
+            "score_target": score_target,
+            "provider": provider,
+            "workspace": workspace,
+            "changelog_path": changelog_path,
+            "research": True,
+            "auto": True,
+            "max_autonomous_rounds": int(one_rounds),
+            "source_retrieval": st.session_state["research_settings"]["source_retrieval"],
+            "review_iterations": st.session_state["research_settings"]["review_iterations"],
+            "execute_experiments":
+                st.session_state["research_settings"]["execute_experiments"],
+        })
+        with st.spinner("Autonomously generating the full article…"):
+            orchestrator = Orchestrator(config, client=llm_client, events=events)
+            result = orchestrator.run_autonomous(one_prompt)
+        st.session_state["draft_markdown"] = (
+            result.final_draft.to_markdown()
+            if result.final_draft and any(s.body.strip() for s in result.final_draft.sections)
+            else ""
+        )
+        research = result.research or {}
+        gate = research.get("quality_gate") or {}
+        st.session_state["run_meta"] = {
+            "status": result.status,
+            "stop_reason": result.stop_reason,
+            "final_score": round(result.final_score, 4),
+            "iterations": len(result.iterations),
+            "tokens_total": result.tokens_total,
+            "workspace": result.workspace,
+            "quality_status": result.quality_status,
+            "quality_label": gate.get("label", ""),
+            "research_report": os.path.join(result.workspace, "research", "report.md")
+            if result.workspace else "",
+        }
+        st.session_state["research_report_markdown"] = research.get("markdown", "")
+        render.render_tracker(one_container, tracker, score_target)
+        if result.quality_status == "ready_for_final_review":
+            st.success("Autonomous run finished — article reached 'Ready for final review'. "
+                       "See the Execution, Research, Scores and Draft tabs.")
+        else:
+            st.warning(
+                f"Autonomous run finished — {result.status}: {result.stop_reason}. "
+                "The article is produced as a proposal/draft; see the tabs for detail."
+            )
 
 tab_brief, tab_exec, tab_research, tab_scores, tab_draft, tab_log = st.tabs(
     ["📋 Brief", "⚡ Execution", "🔬 Research", "📈 Scores", "📄 Draft", "📜 Change Log"]
