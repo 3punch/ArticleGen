@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional
 from . import __version__
 from .changelog import ChangeLog, read_jsonl
 from .gate import verify_brief
-from .llm import resolve_resilient_client
+from .llm import ProviderError, resolve_resilient_client
+from .evaluation import ArticleEvaluator, EvaluationError
 from .models import ArticleType, Brief, CitationStyle
 from .orchestrator import Orchestrator, OrchestratorConfig
 
@@ -282,6 +283,36 @@ def cmd_auto(args: argparse.Namespace) -> int:
     return 0 if result.quality_status == "ready_for_final_review" else 1
 
 
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    """Score an existing article and assign a conservative quality quartile."""
+    with open(args.article, "r", encoding="utf-8") as handle:
+        article = handle.read()
+    client = resolve_resilient_client(provider=args.provider, model=args.model)
+    if not getattr(client, "available", False):
+        print(
+            "error: article evaluation needs an LLM API key. Set ANTHROPIC_API_KEY, "
+            "OPENAI_API_KEY, or DAHL_API_KEY. Use --provider/--model to choose the judge.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = ArticleEvaluator(client).evaluate(
+            article, article_type=args.article_type, audience=args.audience
+        )
+    except (EvaluationError, ProviderError) as exc:
+        print(f"error: evaluation failed: {exc}", file=sys.stderr)
+        return 2
+
+    print(result.to_markdown())
+    if args.json:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json)) or ".", exist_ok=True)
+        with open(args.json, "w", encoding="utf-8") as handle:
+            json.dump(result.to_dict(), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        print(f"\nJSON report: {args.json}")
+    return 0
+
+
 def cmd_log(args: argparse.Namespace) -> int:
     jsonl = args.path or "change_log.jsonl"
     entries = read_jsonl(jsonl)
@@ -446,6 +477,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", default=None, help="write the full result JSON here")
     _add_research_options(run)
     run.set_defaults(func=cmd_run)
+
+    evaluate = sub.add_parser(
+        "evaluate", help="score an existing article and assign a Q1-Q4 quality level"
+    )
+    evaluate.add_argument("article", help="path to a Markdown or plain-text article")
+    evaluate.add_argument("--provider", default="auto",
+                          choices=["auto", "anthropic", "openai", "dahl"])
+    evaluate.add_argument("--model", default=None, help="judge model id")
+    evaluate.add_argument("--article-type", default=None,
+                          help="article genre, e.g. educational, review, or research")
+    evaluate.add_argument("--audience", default=None, help="intended reader")
+    evaluate.add_argument("--json", default=None, help="also write the full report as JSON")
+    evaluate.set_defaults(func=cmd_evaluate)
 
     log = sub.add_parser("log", help="summarise the machine-readable change log")
     log.add_argument("--path", default=None)

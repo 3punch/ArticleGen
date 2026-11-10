@@ -40,7 +40,7 @@ projectforge-worker = "projectforge_orchestrator.worker:main"
 
 [tool.setuptools]
 packages = [
-  "articlegen", "articlegen.agents", "articlegen.ui",
+  "articlegen", "articlegen.agents", "articlegen.ui", "articlegen.evaluation",
   "projectforge_api", "projectforge_schemas", "projectforge_agents",
   "projectforge_orchestrator", "projectforge_sandbox",
 ]

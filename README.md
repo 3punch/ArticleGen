@@ -60,11 +60,23 @@ export DAHL_API_KEY='<Dahl API key>'
 export DAHL_MODEL='zai-org/GLM-5.3-Flash'                  # optional; default shown
 python3 -m articlegen demo                                 # full loop on the example brief
 python3 -m articlegen run path/to/brief.json --iterations 4
+python3 -m articlegen evaluate article.md --article-type research --json assessment.json
 python3 -m articlegen log                                  # summarise change_log.jsonl
 ```
 
 Without a provider key, a run stops before creating a draft. There is no offline
 article-generation fallback.
+
+`evaluate` sends the article to the configured LLM judge and returns six anchored
+1–5 dimension scores, a weighted 0–100 score, an internal Q1–Q4 rubric band, strengths,
+and prioritized issues. These labels are **not journal or bibliometric quartiles**.
+Bands use minimum-dimension thresholds and a blocker veto rather than letting
+a high average hide a serious weakness. The report is an AI-assisted screening only:
+it does not independently fact-check claims, establish novelty, or replace domain-expert
+peer review. Article text is sent to the selected LLM provider for scoring; avoid confidential
+material unless its use is permitted. The article is not silently truncated; inputs over 100,000 characters are
+rejected. Set one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `DAHL_API_KEY` before use.
+The dashboard also has an **Evaluate article** tab for pasting text or uploading `.md` / `.txt` files.
 
 Or with the console script after `pip install -e .`:
 
