@@ -12,6 +12,7 @@ covered by ``tests/test_ui.py`` without needing a browser.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any, Dict
@@ -20,7 +21,8 @@ import streamlit as st
 
 from articlegen.changelog import read_jsonl
 from articlegen.events import EventBus
-from articlegen.llm import DahlClient, resolve_client, resolve_resilient_client
+from articlegen.llm import DahlClient, ProviderError, resolve_client, resolve_resilient_client
+from articlegen.evaluation import ArticleEvaluator, EvaluationError
 from articlegen.orchestrator import Orchestrator, OrchestratorConfig
 from articlegen.cli import TEMPLATE_BRIEF
 from articlegen.ui import builder, render
@@ -261,8 +263,9 @@ with st.expander("⚡ One-prompt mode — describe the article in a single sente
                 "The article is produced as a proposal/draft; see the tabs for detail."
             )
 
-tab_brief, tab_exec, tab_research, tab_scores, tab_draft, tab_log = st.tabs(
-    ["📋 Brief", "⚡ Execution", "🔬 Research", "📈 Scores", "📄 Draft", "📜 Change Log"]
+tab_brief, tab_exec, tab_research, tab_scores, tab_evaluate, tab_draft, tab_log = st.tabs(
+    ["📋 Brief", "⚡ Execution", "🔬 Research", "📈 Scores", "🧪 Evaluate article",
+     "📄 Draft", "📜 Change Log"]
 )
 
 # -- Tab 1: brief + run ---------------------------------------------------
@@ -618,6 +621,108 @@ with tab_scores:
                 f"target {st.session_state.score_target} · "
                 f"stop reason: {tracker.stop_reason or 'n/a'}"
             )
+
+# -- Article assessment ----------------------------------------------------
+
+with tab_evaluate:
+    st.header("Assess an existing article")
+    st.caption(
+        "Get an AI-assisted rubric report, not a journal acceptance prediction. "
+        "Q1–Q4 here are internal quality bands, not journal quartiles. Claims, novelty, "
+        "and citations are not independently verified. The article text is sent to the "
+        "selected LLM provider; do not submit confidential material unless permitted."
+    )
+    assessment_upload = st.file_uploader(
+        "Upload a Markdown or text article", type=["md", "markdown", "txt"],
+        key="assessment_article_upload",
+    )
+    assessment_text = st.text_area(
+        "Or paste the article text", key="assessment_article_text", height=260,
+        placeholder="Paste the complete article here…",
+    )
+    assessment_cols = st.columns(2)
+    assessment_type = assessment_cols[0].selectbox(
+        "Article type", ["Not specified", "Educational", "Research", "Review", "Methods",
+                         "Computational", "Conceptual"], key="assessment_article_type",
+    )
+    assessment_audience = assessment_cols[1].text_input(
+        "Intended audience (optional)", key="assessment_audience",
+    )
+    article_to_assess = assessment_text
+    if assessment_upload is not None:
+        try:
+            article_to_assess = assessment_upload.getvalue().decode("utf-8")
+            st.caption(f"Using uploaded file: {assessment_upload.name}")
+        except UnicodeDecodeError:
+            st.error("The uploaded file is not valid UTF-8 text.")
+            article_to_assess = ""
+    st.caption(f"{len(article_to_assess):,} characters · maximum 100,000")
+    normalized_type = None if assessment_type == "Not specified" else assessment_type.lower()
+    assessment_fingerprint = hashlib.sha256(
+        (article_to_assess + "\\0" + (normalized_type or "") + "\\0"
+         + assessment_audience.strip()).encode("utf-8")
+    ).hexdigest()
+
+    evaluation_client = resolve_resilient_client(
+        provider=provider,
+        model=st.session_state.get("dahl_model", "") if provider == "dahl" else None,
+        api_key=st.session_state.get("dahl_api_key", "") if provider == "dahl" else None,
+        base_url=st.session_state.get("dahl_base_url", "") if provider == "dahl" else None,
+        dahl_api_key=st.session_state.get("dahl_api_key", ""),
+        dahl_model=st.session_state.get("dahl_model", ""),
+        dahl_base_url=st.session_state.get("dahl_base_url", ""),
+    )
+    can_assess = bool(article_to_assess.strip()) and bool(evaluation_client.available)
+    if not evaluation_client.available:
+        st.info("Choose a provider and configure its API key in the sidebar to assess an article.")
+    assess_clicked = st.button("🔎 Assess article", type="primary", disabled=not can_assess,
+                               key="assess_article_button")
+    if assess_clicked:
+        try:
+            with st.spinner("Assessing the article against the rubric…"):
+                assessment = ArticleEvaluator(evaluation_client).evaluate(
+                    article_to_assess,
+                    article_type=normalized_type,
+                    audience=assessment_audience.strip() or None,
+                )
+            st.session_state["article_assessment"] = assessment
+            st.session_state["article_assessment_fingerprint"] = assessment_fingerprint
+        except (EvaluationError, ProviderError) as exc:
+            st.error(f"Assessment failed: {exc}")
+
+    assessment = st.session_state.get("article_assessment")
+    if (assessment is not None
+            and st.session_state.get("article_assessment_fingerprint") != assessment_fingerprint):
+        st.info("The article or its context changed since this report was made. Reassess to get an up-to-date result.")
+        assessment = None
+    if assessment is not None:
+        st.divider()
+        st.subheader(f"Internal quality band: {assessment.quartile}")
+        st.caption("Not a journal or bibliometric quartile.")
+        st.markdown(assessment.verdict)
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Overall score", f"{assessment.overall_score:.1f}/100")
+        metric_cols[1].metric("Band", assessment.quartile)
+        metric_cols[2].metric("Major issues", len(assessment.major_issues))
+        metric_cols[3].metric("Blockers", len(assessment.blockers))
+        st.markdown(assessment.to_markdown())
+        for dimension in assessment.dimensions.values():
+            if dimension.evidence:
+                with st.expander(f"Evidence snippets · {dimension.score}/5"):
+                    for snippet in dimension.evidence:
+                        st.markdown(f"> {snippet}")
+        report_name = "article_assessment"
+        st.download_button(
+            "⬇️ Download assessment (.md)", data=assessment.to_markdown(),
+            file_name=f"{report_name}.md", mime="text/markdown",
+            key="download_assessment_markdown",
+        )
+        st.download_button(
+            "⬇️ Download assessment (.json)",
+            data=json.dumps(assessment.to_dict(), ensure_ascii=False, indent=2),
+            file_name=f"{report_name}.json", mime="application/json",
+            key="download_assessment_json",
+        )
 
 # -- Tab 5: draft ---------------------------------------------------------
 
