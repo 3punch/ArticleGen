@@ -61,6 +61,7 @@ export DAHL_MODEL='zai-org/GLM-5.3-Flash'                  # optional; default s
 python3 -m articlegen demo                                 # full loop on the example brief
 python3 -m articlegen run path/to/brief.json --iterations 4
 python3 -m articlegen evaluate article.md --article-type research --json assessment.json
+python3 -m articlegen review paper.md --json review.json   # audit a manuscript you wrote
 python3 -m articlegen log                                  # summarise change_log.jsonl
 ```
 
@@ -118,6 +119,32 @@ With `pytest` available:
 ```bash
 python3 -m pytest tests/ -q
 make test && make demo
+```
+
+---
+
+## Reviewing an existing manuscript
+
+`articlegen review` audits a manuscript the pipeline did not write (Markdown or plain
+text). It keeps two layers separate:
+
+* **Deterministic checks** need no provider key: citation markers that resolve to no
+  reference entry, entries that are never cited, duplicate or malformed DOIs, empty
+  sections, placeholders, repeated sentences, and numbers reported in the abstract but
+  absent from the body. `--verify-dois` resolves every DOI in Crossref; a missing
+  record is reported as **unverified, not fabricated**.
+* **One advisory model call** can add findings only when the finding quotes the
+  manuscript verbatim; unquotable findings are discarded. Model findings never change
+  readiness and no accept/reject verdict is produced.
+
+Readiness comes from the deterministic layer alone: `major_revision` for a blocker or
+three major findings, `minor_revision` for any major or four minor findings, otherwise
+`no_blocking_findings`. The command exits non-zero only when a blocker is present.
+
+```bash
+python3 -m articlegen review paper.md --json review.json
+python3 -m articlegen review paper.md --no-model        # deterministic only
+python3 -m articlegen review paper.md --verify-dois     # + Crossref lookups
 ```
 
 ---

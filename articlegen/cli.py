@@ -13,6 +13,8 @@ from .changelog import ChangeLog, read_jsonl
 from .gate import verify_brief
 from .llm import ProviderError, resolve_resilient_client
 from .evaluation import ArticleEvaluator, EvaluationError
+from .manuscript import load_manuscript
+from .manuscript_review import review_manuscript
 from .models import ArticleType, Brief, CitationStyle
 from .orchestrator import Orchestrator, OrchestratorConfig
 
@@ -313,6 +315,44 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    """Review a manuscript the pipeline did not write.
+
+    Deterministic checks run without a provider; the model layer is opt-in and
+    every model finding must quote the manuscript verbatim. Readiness is computed
+    only from the deterministic layer, so a missing provider never changes it.
+    """
+    manuscript = load_manuscript(args.article)
+    client = None
+    if not args.no_model:
+        client = resolve_resilient_client(provider=args.provider or "auto",
+                                          model=args.model)
+    report = review_manuscript(
+        manuscript,
+        client=client,
+        model_review=not args.no_model,
+        article_type=args.article_type,
+        audience=args.audience,
+        verify_dois=args.verify_dois,
+        max_issues=args.max_issues,
+    )
+    print(report.to_markdown())
+
+    if args.out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as handle:
+            handle.write(report.to_markdown())
+        print(f"\nreview markdown: {args.out}")
+    if args.json:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json)) or ".", exist_ok=True)
+        with open(args.json, "w", encoding="utf-8") as handle:
+            json.dump(report.to_dict(), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        print(f"review json: {args.json}")
+
+    return 1 if report.blockers else 0
+
+
 def cmd_log(args: argparse.Namespace) -> int:
     jsonl = args.path or "change_log.jsonl"
     entries = read_jsonl(jsonl)
@@ -490,6 +530,29 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--audience", default=None, help="intended reader")
     evaluate.add_argument("--json", default=None, help="also write the full report as JSON")
     evaluate.set_defaults(func=cmd_evaluate)
+
+    review = sub.add_parser(
+        "review",
+        help="review an existing manuscript: citation/structure checks, then an "
+             "advisory model review that must quote the text",
+    )
+    review.add_argument("article", help="path to a Markdown or plain-text manuscript")
+    review.add_argument("--provider", default="auto",
+                        choices=["auto", "anthropic", "openai", "dahl"])
+    review.add_argument("--model", default=None, help="reviewer model id")
+    review.add_argument("--no-model", action="store_true",
+                        help="deterministic checks only; no provider call")
+    review.add_argument("--article-type", default=None,
+                        help="genre hint, e.g. empirical, review, educational")
+    review.add_argument("--audience", default=None, help="intended reader")
+    review.add_argument("--verify-dois", action="store_true",
+                        help="look every DOI up in Crossref (network; absence is not "
+                             "proof of fabrication)")
+    review.add_argument("--max-issues", type=int, default=10,
+                        help="cap on advisory model findings")
+    review.add_argument("--out", default=None, help="write the Markdown review here")
+    review.add_argument("--json", default=None, help="write the review report as JSON")
+    review.set_defaults(func=cmd_review)
 
     log = sub.add_parser("log", help="summarise the machine-readable change log")
     log.add_argument("--path", default=None)
