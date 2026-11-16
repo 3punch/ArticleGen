@@ -27,6 +27,7 @@ AGENT_TEMPLATES: Dict[str, str] = {
     "reviser": "08_reviser.md",
     "brief_writer": "09_brief_writer.md",
     "manuscript_reviewer": "10_manuscript_reviewer.md",
+    "abstract_writer": "11_abstract_writer.md",
 }
 
 

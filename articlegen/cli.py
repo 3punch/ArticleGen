@@ -12,6 +12,7 @@ from . import __version__
 from .changelog import ChangeLog, read_jsonl
 from .gate import verify_brief
 from .llm import ProviderError, resolve_resilient_client
+from .abstract import AbstractError, generate_abstract
 from .evaluation import ArticleEvaluator, EvaluationError
 from .manuscript import load_manuscript
 from .manuscript_review import review_manuscript
@@ -353,6 +354,44 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 1 if report.blockers else 0
 
 
+def cmd_abstract(args: argparse.Namespace) -> int:
+    """Build a structured abstract, titles and keywords with a fact lock.
+
+    Every generated number and Latin-script proper name must occur in the source;
+    offending sentences, titles and keywords are quarantined and reported rather
+    than shown as if they were grounded. The exit code is non-zero when anything
+    was rejected.
+    """
+    manuscript = load_manuscript(args.article)
+    client = resolve_resilient_client(provider=args.provider or "auto", model=args.model)
+    try:
+        package = generate_abstract(
+            manuscript,
+            client=client,
+            article_type=args.article_type,
+            audience=args.audience,
+            max_titles=args.max_titles,
+        )
+    except AbstractError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(package.to_markdown())
+
+    if args.out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as handle:
+            handle.write(package.to_markdown())
+        print(f"\nabstract package: {args.out}")
+    if args.json:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json)) or ".", exist_ok=True)
+        with open(args.json, "w", encoding="utf-8") as handle:
+            json.dump(package.to_dict(), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        print(f"abstract json: {args.json}")
+
+    return 0 if package.fact_lock_ok else 1
+
+
 def cmd_log(args: argparse.Namespace) -> int:
     jsonl = args.path or "change_log.jsonl"
     entries = read_jsonl(jsonl)
@@ -508,7 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--iterations", type=int, default=None)
     run.add_argument("--target", type=float, default=None, help="quality score target")
     run.add_argument("--provider", default=None,
-                     choices=["auto", "anthropic", "openai", "dahl"])
+                     choices=["auto", "anthropic", "openai", "dahl", "gateway"])
     run.add_argument("--model", default=None,
                      help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     run.add_argument("--workspace", default=None)
@@ -523,7 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("article", help="path to a Markdown or plain-text article")
     evaluate.add_argument("--provider", default="auto",
-                          choices=["auto", "anthropic", "openai", "dahl"])
+                          choices=["auto", "anthropic", "openai", "dahl", "gateway"])
     evaluate.add_argument("--model", default=None, help="judge model id")
     evaluate.add_argument("--article-type", default=None,
                           help="article genre, e.g. educational, review, or research")
@@ -538,7 +577,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.add_argument("article", help="path to a Markdown or plain-text manuscript")
     review.add_argument("--provider", default="auto",
-                        choices=["auto", "anthropic", "openai", "dahl"])
+                        choices=["auto", "anthropic", "openai", "dahl", "gateway"])
     review.add_argument("--model", default=None, help="reviewer model id")
     review.add_argument("--no-model", action="store_true",
                         help="deterministic checks only; no provider call")
@@ -553,6 +592,24 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--out", default=None, help="write the Markdown review here")
     review.add_argument("--json", default=None, help="write the review report as JSON")
     review.set_defaults(func=cmd_review)
+
+    abstract = sub.add_parser(
+        "abstract",
+        help="build a structured abstract, title options and keywords whose numbers "
+             "and names are locked to the source text",
+    )
+    abstract.add_argument("article", help="path to a Markdown or plain-text manuscript")
+    abstract.add_argument("--provider", default="auto",
+                          choices=["auto", "anthropic", "openai", "dahl"])
+    abstract.add_argument("--model", default=None, help="writer model id")
+    abstract.add_argument("--article-type", default=None,
+                          help="genre hint, e.g. empirical, review, educational")
+    abstract.add_argument("--audience", default=None, help="intended reader")
+    abstract.add_argument("--max-titles", type=int, default=5,
+                          help="maximum number of title options to keep")
+    abstract.add_argument("--out", default=None, help="write the Markdown package here")
+    abstract.add_argument("--json", default=None, help="write the package as JSON")
+    abstract.set_defaults(func=cmd_abstract)
 
     log = sub.add_parser("log", help="summarise the machine-readable change log")
     log.add_argument("--path", default=None)
@@ -574,7 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto.add_argument("--iterations", type=int, default=None)
     auto.add_argument("--target", type=float, default=None, help="quality score target")
     auto.add_argument("--provider", default=None,
-                      choices=["auto", "anthropic", "openai", "dahl"])
+                      choices=["auto", "anthropic", "openai", "dahl", "gateway"])
     auto.add_argument("--model", default=None,
                       help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     auto.add_argument("--fallback-models", default=None,
@@ -608,7 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--workspace", default=None)
     demo.add_argument("--changelog", default=None)
     demo.add_argument("--provider", default=None,
-                      choices=["auto", "anthropic", "openai", "dahl"])
+                      choices=["auto", "anthropic", "openai", "dahl", "gateway"])
     demo.add_argument("--model", default=None,
                       help="model id, e.g. zai-org/GLM-5.3-Flash for the dahl provider")
     demo.add_argument("--config", default=None)
