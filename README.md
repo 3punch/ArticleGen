@@ -61,6 +61,8 @@ export DAHL_MODEL='zai-org/GLM-5.3-Flash'                  # optional; default s
 python3 -m articlegen demo                                 # full loop on the example brief
 python3 -m articlegen run path/to/brief.json --iterations 4
 python3 -m articlegen evaluate article.md --article-type research --json assessment.json
+python3 -m articlegen review paper.md --json review.json   # audit a manuscript you wrote
+python3 -m articlegen abstract paper.md --json abstract.json  # abstract + titles + keywords
 python3 -m articlegen log                                  # summarise change_log.jsonl
 ```
 
@@ -119,6 +121,55 @@ With `pytest` available:
 python3 -m pytest tests/ -q
 make test && make demo
 ```
+
+---
+
+## Reviewing an existing manuscript
+
+`articlegen review` audits a manuscript the pipeline did not write (Markdown or plain
+text). It keeps two layers separate:
+
+* **Deterministic checks** need no provider key: citation markers that resolve to no
+  reference entry, entries that are never cited, duplicate or malformed DOIs, empty
+  sections, placeholders, repeated sentences, and numbers reported in the abstract but
+  absent from the body. `--verify-dois` resolves every DOI in Crossref; a missing
+  record is reported as **unverified, not fabricated**.
+* **One advisory model call** can add findings only when the finding quotes the
+  manuscript verbatim; unquotable findings are discarded. Model findings never change
+  readiness and no accept/reject verdict is produced.
+
+Readiness comes from the deterministic layer alone: `major_revision` for a blocker or
+three major findings, `minor_revision` for any major or four minor findings, otherwise
+`no_blocking_findings`. The command exits non-zero only when a blocker is present.
+
+```bash
+python3 -m articlegen review paper.md --json review.json
+python3 -m articlegen review paper.md --no-model        # deterministic only
+python3 -m articlegen review paper.md --verify-dois     # + Crossref lookups
+```
+
+---
+
+## Abstract, titles and keywords with a fact lock
+
+`articlegen abstract` returns a structured abstract (Background / Objective /
+Methods / Results / Conclusions), title options and keywords. Before anything is
+returned, every number and every Latin-script proper name in the generated text is
+checked against the source manuscript. A sentence that introduces an ungrounded
+number or name is quarantined; a title or keyword that introduces one is rejected.
+The dropped items are listed in the report — nothing is silently corrected.
+
+```bash
+python3 -m articlegen abstract paper.md --json abstract.json
+python3 -m articlegen abstract paper.md --out abstract.md --max-titles 6
+```
+
+The command needs a provider key and exits non-zero when the fact lock rejected
+anything. Numbers are checked in any script; name locking is capitalisation-based and
+covers Latin-script names only. A single capitalised word at the start of a sentence
+is treated as sentence case, so multi-word names and acronyms are locked there. A
+passed lock means no ungrounded number or name was introduced, not that every claim
+is correct.
 
 ---
 
@@ -330,6 +381,7 @@ tests/                 # gate, agents, memory, loop, CLI and dashboard coverage
 | `anthropic` | `ANTHROPIC_API_KEY` set (or `--provider anthropic`) | real model calls via `urllib` |
 | `openai` | `OPENAI_API_KEY` set (or `--provider openai`) | real model calls via `urllib` |
 | `dahl` | `DAHL_API_KEY` set (or `--provider dahl`) | real model calls via `urllib` against the Dahl inference API |
+| `gateway` | `--provider gateway` (explicit; the extra must be installed) | every call goes through the open-source [Respan Gateway](https://github.com/respanai/respan-gateway?utm_source=freebuff&utm_medium=paid&utm_campaign=respan-gateway&bfcid=bfc_1.eyJpZCI6IjA3OWFmNjJiLWU3MTUtNDA3Yi04NTU2LWE1OTk4MjBlYzdmOCIsImMiOiIyMDM2ODZkZS1mMzg0LTQ4NTQtYmViNC1hYzBiYWRmNmM1NTUiLCJrIjoiM2IxMGE4YmUtNzgyOS00MmJhLWFmNmEtYmI0YWUxZTRhY2Y4IiwiaWF0IjoxNzk0ODI1OTE2fQ.kBYur0YkTHhwoao3jKl9IKMWAAjhMKPms2M7e_pRtfY) in-process |
 | `unconfigured` | no usable provider key | run stops before the agent loop; no draft is generated |
 
 The `dahl` provider speaks the OpenAI-compatible chat-completions protocol at
@@ -345,6 +397,40 @@ export ARTICLEGEN_LLM_TIMEOUT_SECONDS=600       # optional; request timeout defa
 articlegen run brief.json --provider dahl --model zai-org/GLM-5.3-Flash
 ```
 
+### Route calls through the Respan Gateway (optional)
+
+The [Respan Gateway](https://github.com/respanai/respan-gateway?utm_source=freebuff&utm_medium=paid&utm_campaign=respan-gateway&bfcid=bfc_1.eyJpZCI6IjA3OWFmNjJiLWU3MTUtNDA3Yi04NTU2LWE1OTk4MjBlYzdmOCIsImMiOiIyMDM2ODZkZS1mMzg0LTQ4NTQtYmViNC1hYzBiYWRmNmM1NTUiLCJrIjoiM2IxMGE4YmUtNzgyOS00MmJhLWFmNmEtYmI0YWUxZTRhY2Y4IiwiaWF0IjoxNzk0ODI1OTE2fQ.kBYur0YkTHhwoao3jKl9IKMWAAjhMKPms2M7e_pRtfY)
+is an open-source, self-hosted LLM gateway. With `--provider gateway` every agent,
+evaluator and reviewer call goes through it **in-process** — no socket, no account,
+no Respan key — while ArticleGen keeps its existing OpenAI-compatible call path. The
+gateway is what decides which provider serves a model name, using your own keys.
+
+```bash
+pip install -e '.[gateway]'                                  # adds respan-gateway==0.3.0
+export OPENAI_API_KEY='<your key>'                           # or ANTHROPIC_API_KEY / GEMINI_API_KEY
+python3 -m articlegen run path/to/brief.json --provider gateway --model gpt-4o-mini
+python3 -m articlegen auto "…your prompt…" --provider gateway --model claude-sonnet-4-5
+```
+
+With no configuration the gateway picks up the provider keys already in the environment
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) and routes by model name
+(`claude-*` to Anthropic, `gemini-*` to Gemini, plain names to the default chat
+provider). For explicit providers, routes, client keys or `env:NAME` secret references,
+add a `gateway.toml` in the directory you run from (or point `RESPAN_CONFIG` at one);
+`Gateway()` reads it automatically. `--model` (or `ARTICLEGEN_GATEWAY_MODEL`) picks the
+model the gateway routes, defaulting to `gpt-4o-mini`; `--fallback-models` on
+`articlegen auto` retries other models through the same gateway. In the dashboard,
+choose `gateway` in the sidebar — it has no key field because the gateway owns the
+provider credentials.
+
+**Verified:** `tests/test_gateway.py` runs a loopback OpenAI-compatible provider and
+checks that `--provider gateway` routes a completion to it, that an upstream HTTP 500
+becomes a `ProviderError`, and that a gateway without a provider is reported as
+unavailable. An end-to-end orchestrator run against that fixture (research mode off)
+reached `PASS` with score 0.976 over 5 gateway-routed model calls and wrote a
+6,958-byte draft. No live provider request was made in this environment; the first real
+call happens on your machine with your own key.
+
 ArticleGen does **not** generate articles offline. If no usable API key is configured,
 the orchestrator stops before creating a draft and explains how to configure a provider.
 The deterministic checkers remain available to unit tests, but they are not a writing
@@ -358,8 +444,9 @@ a 300-second socket timeout by default; set `ARTICLEGEN_LLM_TIMEOUT_SECONDS` (or
 `timeout` to `resolve_client`) to allow longer completions. A timed-out call is recorded
 as a degraded agent with an actionable message rather than an uncaught UI traceback.
 
-**Verification status:** provider request formats are covered by stubbed HTTP tests;
-this sandbox cannot call the live Dahl/Anthropic/OpenAI endpoints.
+**Verification status:** provider request formats are covered by stubbed HTTP tests and
+the gateway path by a loopback-provider integration test; this sandbox cannot call the
+live Dahl/Anthropic/OpenAI endpoints.
 
 ---
 
